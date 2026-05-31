@@ -149,30 +149,22 @@ async function main() {
       console.log(`First run: starting from ROWID ${cutoffRowid} (${INITIAL_BACKFILL_DAYS}d back)`)
     }
 
-    // 1:1 conversations only. We filter group chats at the source because
-    // pugs-sales is Connor's sales CRM — group chats (with friends, family,
-    // teammates) are noise that should never reach the platform.
+    // Pull BOTH 1:1 and group chats. We used to filter groups out here with a
+    // HAVING COUNT(*) = 1 CTE (groups = friends/family noise), but Connor wants
+    // SALES-RELEVANT groups too (a deal/stakeholder chat). We no longer gate by
+    // kind in SQL — instead we pull the per-chat participant count (1 external
+    // handle = direct, 2+ = group) and let the prospect-intersect filter below
+    // keep only chats with a client/prospect in them. Personal groups (no
+    // allowlisted participant) are still dropped before anything leaves the Mac.
     //
-    // Definition of 1:1: the chat this message belongs to has exactly one
-    // external participant (chat_handle_join row count = 1). Group chats
-    // have 2+ external participants. The user's own identity isn't in the
-    // handle table, so 1:1 is genuinely "Connor + one other person."
-    //
-    // We use a CTE-style subquery so the participant-count check happens
-    // once per chat rather than once per row.
-    //
-    // chat-context (added 2026-05-21, migration 049): we also pull the
-    // chat row's GUID, display_name, and the concatenated participant
-    // handles so pugs-sales can give every message a stable thread
-    // identity. For 1:1 we hard-code chat_kind='direct' in JS — when we
-    // eventually widen to group chats, the CTE goes away and chat_kind
-    // is derived from participant count.
+    // chat-context (added 2026-05-21, migration 049): we also pull the chat
+    // row's GUID, display_name, and the concatenated participant handles so
+    // pugs-sales can give every message a stable thread identity.
     const rows = db.prepare(`
-      WITH one_to_one_chats AS (
-        SELECT chat_id
+      WITH chat_participant_counts AS (
+        SELECT chat_id, COUNT(*) AS participant_count
         FROM chat_handle_join
         GROUP BY chat_id
-        HAVING COUNT(*) = 1
       )
       SELECT
         m.ROWID         AS rowid,
@@ -185,6 +177,7 @@ async function main() {
         h.id            AS handle,
         c.guid          AS chat_guid,
         c.display_name  AS chat_display_name,
+        cpc.participant_count AS participant_count,
         (
           SELECT group_concat(h2.id, char(31))
           FROM chat_handle_join chj2
@@ -194,7 +187,7 @@ async function main() {
       FROM message m
       LEFT JOIN handle h ON m.handle_id = h.ROWID
       JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-      JOIN one_to_one_chats o2o ON o2o.chat_id = cmj.chat_id
+      JOIN chat_participant_counts cpc ON cpc.chat_id = cmj.chat_id
       JOIN chat c ON c.ROWID = cmj.chat_id
       WHERE m.ROWID > ?
         AND m.text IS NOT NULL
@@ -236,9 +229,8 @@ async function main() {
         account: r.account || null,
         service: r.service === 'SMS' ? 'SMS' : 'iMessage',
         chat_id: r.chat_guid || null,
-        // Filter is 1:1-only, so kind is always 'direct'. When we widen,
-        // derive from participant count instead.
-        chat_kind: 'direct',
+        // 1 external handle = direct (Connor + one other); 2+ = group.
+        chat_kind: r.participant_count === 1 ? 'direct' : 'group',
         chat_name: r.chat_display_name || null,
         // group_concat uses ASCII Unit Separator (0x1F) — won't collide
         // with phone/email content. Returns null when chat has no handles.
@@ -257,24 +249,30 @@ async function main() {
     // on this Mac) gets dropped — that's the backdoor we're closing.
     const beforeProspect = payload.length
     let droppedWrongAccount = 0
-    const filteredPayload = payload.filter(p => {
-      if (p.is_from_me) {
-        // chat.db's message.account is typically a prefixed string like
-        // "iMessage;-;cjfpug@icloud.com" (or "E:cjfpug@icloud.com" on older
-        // macOS). Using includes() means EXPECTED_APPLE_ID can be set to
-        // the bare email/phone (e.g. "cjfpug@icloud.com") and still match.
-        if (EXPECTED_APPLE_ID && p.account && !p.account.includes(EXPECTED_APPLE_ID)) {
-          droppedWrongAccount++
-          return false
-        }
-        return true
-      }
-      if (!p.handle) return false
-      if (p.handle.includes('@')) {
-        return prospects.emails.has(p.handle.trim().toLowerCase())
-      }
-      const digits = p.handle.replace(/\D/g, '').slice(-10)
+    // Is a single handle (phone or email) an allowlisted prospect/client?
+    const handleAllowed = (handle) => {
+      if (!handle) return false
+      if (handle.includes('@')) return prospects.emails.has(handle.trim().toLowerCase())
+      const digits = handle.replace(/\D/g, '').slice(-10)
       return digits.length === 10 && prospects.phones.has(digits)
+    }
+    const filteredPayload = payload.filter(p => {
+      // Wrong-iCloud guard: outbound must come from the configured Apple ID,
+      // regardless of chat kind. (account is like "iMessage;-;cjfpug@icloud.com";
+      // includes() lets EXPECTED_APPLE_ID be the bare email/phone.)
+      if (p.is_from_me && EXPECTED_APPLE_ID && p.account && !p.account.includes(EXPECTED_APPLE_ID)) {
+        droppedWrongAccount++
+        return false
+      }
+      if (p.chat_kind === 'group') {
+        // Sales-relevant groups only: keep iff a client/prospect is in the room.
+        // Personal groups (no allowlisted participant) never leave the Mac.
+        return Array.isArray(p.chat_participants) && p.chat_participants.some(handleAllowed)
+      }
+      // Direct 1:1: outbound from the right account passes; inbound passes only
+      // from an allowlisted prospect/client handle (unchanged behavior).
+      if (p.is_from_me) return true
+      return handleAllowed(p.handle)
     })
     const droppedNotProspect = beforeProspect - filteredPayload.length - droppedWrongAccount
     if (droppedNotProspect > 0 || droppedWrongAccount > 0) {
