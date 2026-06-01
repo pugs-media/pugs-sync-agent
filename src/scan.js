@@ -16,6 +16,7 @@ const os   = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 const { syncContacts } = require('./contacts')
+const { appleDateToISO, classifyMessage } = require('./filter')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -46,18 +47,8 @@ if (!WEBHOOK_URL || !SECRET) {
 
 // ───────────────────────────────────────────────────────────────────────
 // Helpers
-
-/**
- * Apple Core Data dates are seconds (older macOS) OR nanoseconds (Sierra+)
- * since 2001-01-01 00:00:00 UTC (978307200 unix seconds). Auto-detect.
- */
-function appleDateToISO(d) {
-  if (d === null || d === undefined) return null
-  // Sentinel: nanoseconds since 2001 is > 1e15 in modern macOS
-  const ms = d > 1e15 ? (d / 1e6) + 978307200000 : (d * 1000) + 978307200000
-  if (!isFinite(ms)) return null
-  return new Date(ms).toISOString()
-}
+// appleDateToISO + the prospect-allowlist predicates live in ./filter.js so
+// the security boundary stays unit-tested. See `npm test`.
 
 function loadState() {
   try {
@@ -247,32 +238,16 @@ async function main() {
     // first-touch that auto-extends the allowlist server-side. Outbound
     // from a DIFFERENT account (= a different iCloud signed into Messages
     // on this Mac) gets dropped — that's the backdoor we're closing.
+    // Prospect-intersect + wrong-iCloud guard. The predicate lives in
+    // ./filter.js (classifyMessage) so it stays unit-tested — see `npm test`.
+    // (account is like "iMessage;-;cjfpug@icloud.com"; classifyMessage uses
+    // includes() so EXPECTED_APPLE_ID may be the bare email/phone.)
     const beforeProspect = payload.length
     let droppedWrongAccount = 0
-    // Is a single handle (phone or email) an allowlisted prospect/client?
-    const handleAllowed = (handle) => {
-      if (!handle) return false
-      if (handle.includes('@')) return prospects.emails.has(handle.trim().toLowerCase())
-      const digits = handle.replace(/\D/g, '').slice(-10)
-      return digits.length === 10 && prospects.phones.has(digits)
-    }
     const filteredPayload = payload.filter(p => {
-      // Wrong-iCloud guard: outbound must come from the configured Apple ID,
-      // regardless of chat kind. (account is like "iMessage;-;cjfpug@icloud.com";
-      // includes() lets EXPECTED_APPLE_ID be the bare email/phone.)
-      if (p.is_from_me && EXPECTED_APPLE_ID && p.account && !p.account.includes(EXPECTED_APPLE_ID)) {
-        droppedWrongAccount++
-        return false
-      }
-      if (p.chat_kind === 'group') {
-        // Sales-relevant groups only: keep iff a client/prospect is in the room.
-        // Personal groups (no allowlisted participant) never leave the Mac.
-        return Array.isArray(p.chat_participants) && p.chat_participants.some(handleAllowed)
-      }
-      // Direct 1:1: outbound from the right account passes; inbound passes only
-      // from an allowlisted prospect/client handle (unchanged behavior).
-      if (p.is_from_me) return true
-      return handleAllowed(p.handle)
+      const verdict = classifyMessage(p, { prospects, expectedAppleId: EXPECTED_APPLE_ID })
+      if (verdict === 'drop_wrong_account') droppedWrongAccount++
+      return verdict === 'ship'
     })
     const droppedNotProspect = beforeProspect - filteredPayload.length - droppedWrongAccount
     if (droppedNotProspect > 0 || droppedWrongAccount > 0) {
