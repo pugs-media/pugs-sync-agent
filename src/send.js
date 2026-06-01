@@ -16,6 +16,7 @@ const path = require('path')
 const { execFile } = require('child_process')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const express = require('express')
+const { buildSendScript } = require('./applescript')
 
 const PORT   = parseInt(process.env.SENDER_PORT || '7890', 10)
 const SECRET = process.env.PUGS_SYNC_SECRET
@@ -49,19 +50,10 @@ app.post('/send', (req, res) => {
   if (typeof to !== 'string' || typeof text !== 'string') {
     return res.status(400).json({ error: 'to/text must be strings' })
   }
-  // Sanitize for AppleScript string interpolation
-  const safeTo   = to.replace(/[\\"]/g, '\\$&')
-  const safeText = text.replace(/[\\"]/g, '\\$&').replace(/\n/g, '\\n')
+  // Build the AppleScript with escaped handle/body so a quote, backslash, or
+  // newline in either can't break out of the string literal (see applescript.js).
   const svc = service === 'SMS' ? 'SMS' : 'iMessage'
-
-  // AppleScript: target the iMessage or SMS service, get the buddy, send.
-  const script = `
-    tell application "Messages"
-      set targetService to 1st service whose service type = ${svc}
-      set targetBuddy to buddy "${safeTo}" of targetService
-      send "${safeText}" to targetBuddy
-    end tell
-  `
+  const script = buildSendScript({ to, text, service: svc })
 
   execFile('osascript', ['-e', script], { timeout: 15000 }, (err, stdout, stderr) => {
     if (err) {
