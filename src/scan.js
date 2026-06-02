@@ -16,6 +16,7 @@ const os   = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 const { syncContacts } = require('./contacts')
+const { filterMessages } = require('./filter')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -248,33 +249,11 @@ async function main() {
     // from a DIFFERENT account (= a different iCloud signed into Messages
     // on this Mac) gets dropped — that's the backdoor we're closing.
     const beforeProspect = payload.length
-    let droppedWrongAccount = 0
-    // Is a single handle (phone or email) an allowlisted prospect/client?
-    const handleAllowed = (handle) => {
-      if (!handle) return false
-      if (handle.includes('@')) return prospects.emails.has(handle.trim().toLowerCase())
-      const digits = handle.replace(/\D/g, '').slice(-10)
-      return digits.length === 10 && prospects.phones.has(digits)
-    }
-    const filteredPayload = payload.filter(p => {
-      // Wrong-iCloud guard: outbound must come from the configured Apple ID,
-      // regardless of chat kind. (account is like "iMessage;-;cjfpug@icloud.com";
-      // includes() lets EXPECTED_APPLE_ID be the bare email/phone.)
-      if (p.is_from_me && EXPECTED_APPLE_ID && p.account && !p.account.includes(EXPECTED_APPLE_ID)) {
-        droppedWrongAccount++
-        return false
-      }
-      if (p.chat_kind === 'group') {
-        // Sales-relevant groups only: keep iff a client/prospect is in the room.
-        // Personal groups (no allowlisted participant) never leave the Mac.
-        return Array.isArray(p.chat_participants) && p.chat_participants.some(handleAllowed)
-      }
-      // Direct 1:1: outbound from the right account passes; inbound passes only
-      // from an allowlisted prospect/client handle (unchanged behavior).
-      if (p.is_from_me) return true
-      return handleAllowed(p.handle)
-    })
-    const droppedNotProspect = beforeProspect - filteredPayload.length - droppedWrongAccount
+    // Scoping filter lives in ./filter.js (pure + unit-tested) — it enforces
+    // the wrong-iCloud guard, group prospect-intersect, and direct-1:1 rules
+    // that keep non-prospect/personal messages from ever leaving this Mac.
+    const { kept: filteredPayload, droppedWrongAccount, droppedNotProspect } =
+      filterMessages(payload, { prospects, expectedAppleId: EXPECTED_APPLE_ID })
     if (droppedNotProspect > 0 || droppedWrongAccount > 0) {
       console.log(`Dropped ${droppedNotProspect + droppedWrongAccount}/${beforeProspect} rows (${droppedNotProspect} not-prospect, ${droppedWrongAccount} wrong-apple-id)`)
     }
