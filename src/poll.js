@@ -23,6 +23,7 @@
 
 const path = require('path')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
+const { planItem } = require('./dispatch')
 
 const WEBHOOK_URL      = process.env.PUGS_SYNC_WEBHOOK_URL
 const SECRET           = process.env.PUGS_SYNC_SECRET
@@ -99,10 +100,24 @@ async function pollOnce() {
   log(`processing ${items.length} pending iMessage(s)`)
 
   for (const item of items) {
-    if (item.attempts >= MAX_ATTEMPTS) {
+    const plan = planItem(item, { maxAttempts: MAX_ATTEMPTS })
+
+    if (plan.action === 'drop') {
+      log(`drop queue item (${plan.reason}):`, JSON.stringify(item).slice(0, 200))
+      continue
+    }
+    if (plan.action === 'skip') {
       log(`skip ${item.id}: attempts=${item.attempts} >= MAX_ATTEMPTS=${MAX_ATTEMPTS}`)
       continue
     }
+    if (plan.action === 'fail') {
+      // Malformed/blank row — fail it WITHOUT calling the local sender so it can
+      // never misfire a real iMessage.
+      log(`failed ${item.id}: ${plan.reason} (not dispatched)`)
+      await reportOutcome(item.id, { status: 'failed', error: plan.reason })
+      continue
+    }
+
     try {
       await dispatchToLocalSender(item)
       await reportOutcome(item.id, { status: 'sent' })
