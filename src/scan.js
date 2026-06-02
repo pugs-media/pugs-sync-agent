@@ -18,6 +18,7 @@ const Database = require('better-sqlite3')
 const { syncContacts } = require('./contacts')
 const { filterMessages } = require('./filter')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
+const { appleDateToISO } = require('./appledate')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -48,18 +49,6 @@ if (!WEBHOOK_URL || !SECRET) {
 
 // ───────────────────────────────────────────────────────────────────────
 // Helpers
-
-/**
- * Apple Core Data dates are seconds (older macOS) OR nanoseconds (Sierra+)
- * since 2001-01-01 00:00:00 UTC (978307200 unix seconds). Auto-detect.
- */
-function appleDateToISO(d) {
-  if (d === null || d === undefined) return null
-  // Sentinel: nanoseconds since 2001 is > 1e15 in modern macOS
-  const ms = d > 1e15 ? (d / 1e6) + 978307200000 : (d * 1000) + 978307200000
-  if (!isFinite(ms)) return null
-  return new Date(ms).toISOString()
-}
 
 function loadState() {
   try {
