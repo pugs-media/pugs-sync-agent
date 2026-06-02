@@ -17,6 +17,7 @@ const path = require('path')
 const Database = require('better-sqlite3')
 const { syncContacts } = require('./contacts')
 const { filterMessages } = require('./filter')
+const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -72,11 +73,14 @@ function saveState(state) {
 }
 
 /**
- * Copy chat.db to a temp file we can safely query.
+ * Copy chat.db (plus its WAL sidecars) to a temp file we can safely query.
+ * Messages.app runs chat.db in WAL mode, so the newest messages live in
+ * chat.db-wal until a checkpoint — snapshotSqlite copies the sidecars too so
+ * the read-only open below replays the WAL and sees them. See ./snapshot.js.
  */
 function snapshotDb() {
   const dest = path.join(os.tmpdir(), `pugs-chat-${Date.now()}.db`)
-  fs.copyFileSync(CHAT_DB, dest)
+  snapshotSqlite(CHAT_DB, dest)
   return dest
 }
 
@@ -215,7 +219,7 @@ async function main() {
         console.error(`Heartbeat failed: ${e.message}`)
       }
       db.close()
-      fs.unlinkSync(snapshotPath)
+      cleanupSnapshot(snapshotPath)
       return
     }
 
@@ -273,7 +277,7 @@ async function main() {
     if (!resp.ok) {
       console.error(`Webhook failed ${resp.status}: ${text.slice(0, 500)}`)
       db.close()
-      fs.unlinkSync(snapshotPath)
+      cleanupSnapshot(snapshotPath)
       process.exit(4)
     }
     console.log(`Webhook OK: ${text.slice(0, 200)}`)
@@ -289,7 +293,7 @@ async function main() {
     console.log(`Advanced state to ROWID ${lastRowid}`)
   } finally {
     if (db) db.close()
-    try { fs.unlinkSync(snapshotPath) } catch {}
+    cleanupSnapshot(snapshotPath)
   }
 
   // Contacts enrichment — POST (name, phone) and (name, email) pairs from
