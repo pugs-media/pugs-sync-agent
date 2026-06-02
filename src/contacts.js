@@ -24,6 +24,7 @@ const fs   = require('fs')
 const os   = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
+const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 
 const SOURCES_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AddressBook', 'Sources')
 
@@ -37,9 +38,16 @@ function findAddressBooks() {
   return dbs
 }
 
+// Copy an AddressBook DB to a private temp path BEFORE querying it. Like
+// chat.db, AddressBook-v22.abcddb is held open by Contacts.app in WAL journal
+// mode, so the newest contacts (a prospect Connor just saved) live in the
+// un-checkpointed `-wal` sidecar and are invisible if we copy only the main
+// file. snapshotSqlite copies the sidecars too so the read-only open replays
+// the WAL and sees them — same fix the scanner uses for chat.db. See
+// ./snapshot.js.
 function snapshot(srcPath) {
   const dest = path.join(os.tmpdir(), `pugs-ab-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
-  fs.copyFileSync(srcPath, dest)
+  snapshotSqlite(srcPath, dest)
   return dest
 }
 
@@ -170,10 +178,12 @@ async function syncContacts({ webhookBase, secret, scannerId = '' }) {
       server: (() => { try { return JSON.parse(text) } catch { return text.slice(0, 200) } })(),
     }
   } finally {
+    // cleanupSnapshot removes the main file AND its -wal/-shm sidecars (which
+    // snapshot() now copies) — a plain unlink would leak the sidecars.
     for (const s of snapshots) {
-      try { fs.unlinkSync(s) } catch {}
+      cleanupSnapshot(s)
     }
   }
 }
 
-module.exports = { syncContacts }
+module.exports = { syncContacts, findAddressBooks, snapshot, extractFromDb, buildName }
