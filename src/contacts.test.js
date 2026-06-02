@@ -7,7 +7,7 @@ const os = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 
-const { snapshot, extractFromDb, buildName } = require('./contacts')
+const { snapshot, extractFromDb, buildName, dedupeContacts } = require('./contacts')
 
 // Each test gets its own scratch dir so parallel runs don't collide.
 let dir
@@ -116,4 +116,80 @@ test('snapshot: a contact still in the un-checkpointed WAL is seen via the snaps
     cleanupSnapshot(snap)
     db.close()
   }
+})
+
+// ── dedupeContacts (pure) ────────────────────────────────────────────────────
+
+test('dedupeContacts: keys phones by last 10 digits and emails by lowercased form', () => {
+  const out = dedupeContacts({
+    phones: [{ name: 'Lead Acme', phone: '+1 (415) 555-0100' }],
+    emails: [{ name: 'Lead Acme', email: '  Lead@Acme.COM ' }],
+  })
+  assert.deepEqual(out.phones, [{ name: 'Lead Acme', phone: '+1 (415) 555-0100' }])
+  // Email is canonicalized (trimmed + lower-cased) in the shipped payload.
+  assert.deepEqual(out.emails, [{ name: 'Lead Acme', email: 'lead@acme.com' }])
+})
+
+test('dedupeContacts: collapses the same number/email across sources, first write wins', () => {
+  // Same person in two AddressBook sources, differently formatted + named.
+  const out = dedupeContacts({
+    phones: [
+      { name: 'Connor iCloud', phone: '415-555-0100' },
+      { name: 'Connor Local',  phone: '+1 (415) 555-0100' },   // same last-10 → dropped
+    ],
+    emails: [
+      { name: 'Connor iCloud', email: 'c@pugs.media' },
+      { name: 'Connor Local',  email: 'C@Pugs.Media' },         // same lowercased → dropped
+    ],
+  })
+  assert.deepEqual(out.phones, [{ name: 'Connor iCloud', phone: '415-555-0100' }])
+  assert.deepEqual(out.emails, [{ name: 'Connor iCloud', email: 'c@pugs.media' }])
+})
+
+test('dedupeContacts: distinct handles are all kept and order is preserved', () => {
+  const out = dedupeContacts({
+    phones: [
+      { name: 'A', phone: '415-555-0100' },
+      { name: 'B', phone: '202-555-0199' },
+    ],
+    emails: [
+      { name: 'A', email: 'a@x.com' },
+      { name: 'B', email: 'b@y.com' },
+    ],
+  })
+  assert.deepEqual(out.phones.map(p => p.name), ['A', 'B'])
+  assert.deepEqual(out.emails.map(e => e.email), ['a@x.com', 'b@y.com'])
+})
+
+test('dedupeContacts: drops handles that cannot be a usable phone/email', () => {
+  const out = dedupeContacts({
+    phones: [
+      { name: 'Short Code', phone: '262966' },        // < 10 digits → dropped
+      { name: 'Blank',      phone: '' },               // empty → dropped
+      { name: 'Missing',    phone: null },             // null → dropped
+      { name: 'Good',       phone: '14155550100' },    // 11 digits → last 10 kept
+    ],
+    emails: [
+      { name: 'No At',  email: 'not-an-email' },        // no '@' → dropped
+      { name: 'Blank',  email: '' },                    // empty → dropped
+      { name: 'Good',   email: 'good@example.com' },
+    ],
+  })
+  assert.deepEqual(out.phones, [{ name: 'Good', phone: '14155550100' }])
+  assert.deepEqual(out.emails, [{ name: 'Good', email: 'good@example.com' }])
+})
+
+test('dedupeContacts: tolerates an empty / missing input', () => {
+  assert.deepEqual(dedupeContacts({}), { phones: [], emails: [] })
+  assert.deepEqual(dedupeContacts(), { phones: [], emails: [] })
+})
+
+test('dedupeContacts: phone canonical key matches the scanner allowlist key (filter.js)', () => {
+  // Regression guard: a contact and its prospect-allowlist entry must collapse
+  // to the SAME last-10-digit key, or enrichment silently never matches.
+  const { makeHandleAllowed } = require('./filter')
+  const out = dedupeContacts({ phones: [{ name: 'Lead', phone: '+1 (415) 555-0100' }], emails: [] })
+  const keyDigits = out.phones[0].phone.replace(/\D/g, '').slice(-10)
+  const allowed = makeHandleAllowed({ phones: new Set([keyDigits]), emails: new Set() })
+  assert.ok(allowed('14155550100'), 'same number in a different format must match the canonical key')
 })
