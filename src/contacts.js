@@ -103,6 +103,47 @@ function extractFromDb(dbPath) {
 }
 
 /**
+ * Canonicalize and de-duplicate the raw {name, phone} / {name, email} pairs
+ * pulled from one or more AddressBook sources into the cloud payload shape.
+ *
+ * macOS keeps several AddressBook sources (iCloud, local, Exchange) and the
+ * same person can appear in more than one, so the same number/email shows up
+ * repeatedly — this is where that union collapses to one entry per handle.
+ *
+ *   - Phones are keyed by their last 10 digits (NANP local number) — the SAME
+ *     key the scanner's prospect allowlist uses (see filter.js makeHandleAllowed)
+ *     — so the cloud can match a contact regardless of +1 / spacing / punctuation.
+ *     Anything that doesn't reduce to exactly 10 digits (short codes, partial
+ *     entries) is dropped rather than shipped as an un-matchable handle.
+ *   - Emails are keyed by their trimmed, lower-cased form; anything without an
+ *     '@' is dropped.
+ *   - First write wins per key, so earlier sources take precedence, and input
+ *     order is preserved in the output for stable, testable results.
+ *
+ * Pure (no I/O) so this PII-shipping boundary is unit-testable on its own —
+ * same pattern as filter.js / dispatch.js. syncContacts feeds it the rows it
+ * read from each AddressBook snapshot.
+ *
+ * @param {{phones?: {name: string, phone: string}[], emails?: {name: string, email: string}[]}} raw
+ * @returns {{phones: {name: string, phone: string}[], emails: {name: string, email: string}[]}}
+ */
+function dedupeContacts({ phones = [], emails = [] } = {}) {
+  const phoneMap = new Map()
+  for (const { name, phone } of phones) {
+    const digits = (phone || '').replace(/\D/g, '').slice(-10)
+    if (digits.length !== 10) continue
+    if (!phoneMap.has(digits)) phoneMap.set(digits, { name, phone })
+  }
+  const emailMap = new Map()
+  for (const { name, email } of emails) {
+    const lower = (email || '').trim().toLowerCase()
+    if (!lower.includes('@')) continue
+    if (!emailMap.has(lower)) emailMap.set(lower, { name, email: lower })
+  }
+  return { phones: [...phoneMap.values()], emails: [...emailMap.values()] }
+}
+
+/**
  * Sync Mac contacts to pugs-sales. Returns counts. Throws on hard errors.
  *
  * @param {object} opts
@@ -133,31 +174,20 @@ async function syncContacts({ webhookBase, secret, scannerId = '' }) {
     }
   }
 
-  const phoneMap = new Map()
-  const emailMap = new Map()
+  const rawPhones = []
+  const rawEmails = []
   const snapshots = []
   try {
     for (const src of books) {
       const snap = snapshot(src)
       snapshots.push(snap)
       const { phones, emails } = extractFromDb(snap)
-
-      for (const { name, phone } of phones) {
-        const digits = (phone || '').replace(/\D/g, '').slice(-10)
-        if (digits.length !== 10) continue
-        if (!phoneMap.has(digits)) phoneMap.set(digits, { name, phone })
-      }
-      for (const { name, email } of emails) {
-        const lower = (email || '').trim().toLowerCase()
-        if (!lower.includes('@')) continue
-        if (!emailMap.has(lower)) emailMap.set(lower, { name, email: lower })
-      }
+      rawPhones.push(...phones)
+      rawEmails.push(...emails)
     }
 
-    const payload = {
-      phones: [...phoneMap.values()],
-      emails: [...emailMap.values()],
-    }
+    // Canonicalize + union across all sources (pure + unit-tested).
+    const payload = dedupeContacts({ phones: rawPhones, emails: rawEmails })
 
     const resp = await fetch(`${webhookBase}/api/sync/contacts`, {
       method:  'POST',
@@ -186,4 +216,4 @@ async function syncContacts({ webhookBase, secret, scannerId = '' }) {
   }
 }
 
-module.exports = { syncContacts, findAddressBooks, snapshot, extractFromDb, buildName }
+module.exports = { syncContacts, findAddressBooks, snapshot, extractFromDb, buildName, dedupeContacts }
