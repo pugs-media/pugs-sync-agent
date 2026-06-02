@@ -18,7 +18,7 @@ const Database = require('better-sqlite3')
 const { syncContacts } = require('./contacts')
 const { filterMessages } = require('./filter')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
-const { appleDateToISO } = require('./appledate')
+const { normalizeRows } = require('./payload')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -212,27 +212,10 @@ async function main() {
       return
     }
 
-    const payload = rows
-      .map(r => ({
-        rowid: r.rowid,
-        guid: r.guid,
-        text: r.text,
-        sent_at: appleDateToISO(r.date),
-        is_from_me: r.is_from_me ? 1 : 0,
-        handle: r.handle,
-        account: r.account || null,
-        service: r.service === 'SMS' ? 'SMS' : 'iMessage',
-        chat_id: r.chat_guid || null,
-        // 1 external handle = direct (Connor + one other); 2+ = group.
-        chat_kind: r.participant_count === 1 ? 'direct' : 'group',
-        chat_name: r.chat_display_name || null,
-        // group_concat uses ASCII Unit Separator (0x1F) — won't collide
-        // with phone/email content. Returns null when chat has no handles.
-        chat_participants: r.chat_participants_concat
-          ? r.chat_participants_concat.split('').filter(Boolean)
-          : null,
-      }))
-      .filter(r => r.sent_at && r.handle)
+    // Row -> cloud payload mapping lives in ./payload.js (pure + unit-tested) so
+    // the group_concat participant separator and sent_at/handle drop rules cannot
+    // silently regress. Drops rows with no usable timestamp or sender handle.
+    const payload = normalizeRows(rows)
 
     // Prospect intersect — drop inbound rows whose sender handle isn't in
     // the allowlist. Outbound (is_from_me=1) passes if (a) the row's
