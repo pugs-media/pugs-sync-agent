@@ -39,6 +39,7 @@ const EXPECTED_APPLE_ID = process.env.EXPECTED_APPLE_ID || ''
 const CHAT_DB     = process.env.CHAT_DB_PATH || path.join(os.homedir(), 'Library', 'Messages', 'chat.db')
 const STATE_PATH  = path.join(__dirname, '..', 'state.json')
 const BATCH_SIZE  = 200
+const MAX_PROSPECT_FETCH_TRIES = 3
 const INITIAL_BACKFILL_DAYS = parseInt(process.env.INITIAL_BACKFILL_DAYS || '90', 10)
 const CONTACTS_SYNC_INTERVAL_MS = 60 * 60 * 1000  // once per hour (was 24h —
 // dropped while we get visibility into whether the sync is firing at all)
@@ -68,27 +69,40 @@ function snapshotDb() {
 // Main
 
 // Fetch the prospect-handle allowlist from pugs-sales. Returns
-// { phonesSet, emailsSet, total }. Throws on network error so caller can
-// decide whether to bail (we bail rather than ship un-filtered messages —
-// a failed allowlist fetch is exactly the kind of edge case that should
-// halt ingestion, not bypass it).
-async function fetchProspectHandles() {
-  const base = new URL(WEBHOOK_URL).origin
-  const res = await fetch(`${base}/api/sync/prospect-handles`, {
-    headers: {
-      'x-pugs-sync-secret': SECRET,
-      'x-pugs-scanner-id':  SCANNER_ID,
-    },
-  })
-  if (!res.ok) {
-    throw new Error(`prospect-handles ${res.status}: ${(await res.text()).slice(0, 200)}`)
+// { phones: Set, emails: Set, total }. Retries up to MAX_PROSPECT_FETCH_TRIES
+// times with exponential backoff before throwing. Throws on persistent failure
+// so the caller can halt — we never ingest without a valid allowlist.
+async function fetchProspectHandles({
+  _fetch     = fetch,
+  _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  webhookUrl = WEBHOOK_URL,
+  secret     = SECRET,
+  scannerId  = SCANNER_ID,
+} = {}) {
+  const base = new URL(webhookUrl).origin
+  const url  = `${base}/api/sync/prospect-handles`
+  let lastError
+  for (let attempt = 1; attempt <= MAX_PROSPECT_FETCH_TRIES; attempt++) {
+    try {
+      const res = await _fetch(url, {
+        headers: { 'x-pugs-sync-secret': secret, 'x-pugs-scanner-id': scannerId },
+      })
+      if (res.ok) {
+        const j = await res.json()
+        return {
+          phones: new Set(j.phones || []),
+          emails: new Set((j.emails || []).map(e => e.toLowerCase())),
+          total:  (j.count_phones || 0) + (j.count_emails || 0),
+        }
+      }
+      const errText = (await res.text()).slice(0, 200)
+      lastError = new Error(`prospect-handles ${res.status}: ${errText}`)
+    } catch (e) {
+      lastError = e
+    }
+    if (attempt < MAX_PROSPECT_FETCH_TRIES) await _delay(500 * attempt)
   }
-  const j = await res.json()
-  return {
-    phones: new Set(j.phones || []),
-    emails: new Set((j.emails || []).map(e => e.toLowerCase())),
-    total:  (j.count_phones || 0) + (j.count_emails || 0),
-  }
+  throw lastError
 }
 
 async function main() {
@@ -105,7 +119,7 @@ async function main() {
   // at the scanner — server has the same check as belt+suspenders.
   let prospects
   try {
-    prospects = await fetchProspectHandles()
+    prospects = await fetchProspectHandles({ webhookUrl: WEBHOOK_URL, secret: SECRET, scannerId: SCANNER_ID })
     console.log(`Prospect allowlist: ${prospects.phones.size} phones + ${prospects.emails.size} emails (${prospects.total} total)`)
   } catch (e) {
     console.error(`Failed to fetch prospect allowlist — halting scan to avoid un-filtered ingest. ${e.message}`)
@@ -292,7 +306,11 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  console.error('Scan failed:', e)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch(e => {
+    console.error('Scan failed:', e)
+    process.exit(1)
+  })
+}
+
+module.exports = { fetchProspectHandles }
