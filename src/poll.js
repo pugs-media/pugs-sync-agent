@@ -87,27 +87,27 @@ async function dispatchToLocalSender(item) {
   return res.json()
 }
 
-async function pollOnce() {
-  let items
-  try {
-    items = await fetchPendingBatch()
-  } catch (e) {
-    log('poll fetch error:', e.message || e)
-    return
-  }
-  if (items.length === 0) return
-
-  log(`processing ${items.length} pending iMessage(s)`)
-
+/**
+ * Process a batch of queue items. Extracted for testability — poll.test.js
+ * exercises every branch with injected deps instead of live network calls.
+ *
+ * @param {object[]} items
+ * @param {{ reportOutcome, dispatchToLocalSender, maxAttempts, log }} deps
+ */
+async function processBatch(items, { reportOutcome, dispatchToLocalSender, maxAttempts, log }) {
   for (const item of items) {
-    const plan = planItem(item, { maxAttempts: MAX_ATTEMPTS })
+    const plan = planItem(item, { maxAttempts })
 
     if (plan.action === 'drop') {
       log(`drop queue item (${plan.reason}):`, JSON.stringify(item).slice(0, 200))
       continue
     }
     if (plan.action === 'skip') {
-      log(`skip ${item.id}: attempts=${item.attempts} >= MAX_ATTEMPTS=${MAX_ATTEMPTS}`)
+      log(`skip ${item.id}: attempts=${item.attempts} >= MAX_ATTEMPTS=${maxAttempts}`)
+      // Report the skip so the cloud can reap the row. Without this the item
+      // stays 'pending' and re-appears every poll cycle, consuming queue slots
+      // and starving new outbound messages.
+      await reportOutcome(item.id, { status: 'skipped', reason: 'exceeded max retry attempts' })
       continue
     }
     if (plan.action === 'fail') {
@@ -130,6 +130,20 @@ async function pollOnce() {
   }
 }
 
+async function pollOnce() {
+  let items
+  try {
+    items = await fetchPendingBatch()
+  } catch (e) {
+    log('poll fetch error:', e.message || e)
+    return
+  }
+  if (items.length === 0) return
+
+  log(`processing ${items.length} pending iMessage(s)`)
+  await processBatch(items, { reportOutcome, dispatchToLocalSender, maxAttempts: MAX_ATTEMPTS, log })
+}
+
 async function loop() {
   // First tick immediately, then on interval.
   for (;;) {
@@ -138,8 +152,12 @@ async function loop() {
   }
 }
 
-log(`pugs-sync poller starting · base=${API_BASE} · interval=${POLL_INTERVAL_MS}ms`)
-loop().catch(e => {
-  log('fatal loop error:', e)
-  process.exit(1)
-})
+if (require.main === module) {
+  log(`pugs-sync poller starting · base=${API_BASE} · interval=${POLL_INTERVAL_MS}ms`)
+  loop().catch(e => {
+    log('fatal loop error:', e)
+    process.exit(1)
+  })
+}
+
+module.exports = { processBatch }

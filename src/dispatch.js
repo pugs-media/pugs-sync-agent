@@ -13,8 +13,9 @@
  *
  * Decisions:
  *   - 'send' : the item is well-formed and under the retry ceiling → dispatch.
- *   - 'skip' : attempts >= maxAttempts → leave it for the cloud to reap (no
- *              report; preserves prior poller behaviour for dead rows).
+ *   - 'skip' : attempts >= maxAttempts → report as 'skipped' so the cloud can
+ *              reap the dead row; without a report it stays 'pending' forever
+ *              and consumes a queue slot on every poll cycle.
  *   - 'fail' : the item is structurally present (has an id) but its to_handle or
  *              body is missing/blank → report 'failed' WITHOUT touching the local
  *              sender, so a malformed/blank row can never misfire a real send.
