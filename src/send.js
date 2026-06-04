@@ -16,7 +16,7 @@ const path = require('path')
 const { execFile } = require('child_process')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const express = require('express')
-const { buildSendScript } = require('./applescript')
+const { buildSendScript, parseOsascriptResult } = require('./applescript')
 
 const PORT   = parseInt(process.env.SENDER_PORT || '7890', 10)
 const SECRET = process.env.PUGS_SYNC_SECRET
@@ -57,8 +57,13 @@ app.post('/send', (req, res) => {
 
   execFile('osascript', ['-e', script], { timeout: 15000 }, (err, stdout, stderr) => {
     if (err) {
-      console.error('osascript failed:', stderr || err.message)
+      console.error('osascript process error:', stderr || err.message)
       return res.status(500).json({ error: 'send failed', detail: (stderr || err.message).slice(0, 400) })
+    }
+    const parsed = parseOsascriptResult(stdout)
+    if (!parsed.ok) {
+      console.error('osascript reported send failure:', parsed.detail)
+      return res.status(500).json({ error: 'send failed', detail: parsed.detail })
     }
     res.json({ ok: true, to, service: svc })
   })

@@ -45,6 +45,12 @@ function escapeAppleScriptString(s) {
  * defaults to 'iMessage'. Both `to` and `text` are escaped so a quote,
  * backslash, or newline in either cannot break out of the string literal.
  *
+ * The script wraps the send in a try/on error block and writes "ok" to stdout
+ * on success or "error:<code>:<message>" on failure. This means send.js can
+ * validate the send actually succeeded by checking stdout — not just the
+ * osascript exit code, which is 0 even on AppleScript runtime errors like
+ * buddy-not-found.
+ *
  * @param {{to: string, text: string, service?: string}} args
  * @returns {string} AppleScript source suitable for `osascript -e`.
  */
@@ -54,11 +60,33 @@ function buildSendScript({ to, text, service } = {}) {
   const safeText = escapeAppleScriptString(text)
   return `
     tell application "Messages"
-      set targetService to 1st service whose service type = ${svc}
-      set targetBuddy to buddy "${safeTo}" of targetService
-      send "${safeText}" to targetBuddy
+      try
+        set targetService to 1st service whose service type = ${svc}
+        set targetBuddy to buddy "${safeTo}" of targetService
+        send "${safeText}" to targetBuddy
+        return "ok"
+      on error errMsg number errNum
+        return "error:" & errNum & ":" & errMsg
+      end try
     end tell
   `
 }
 
-module.exports = { escapeAppleScriptString, buildSendScript }
+/**
+ * Parse the stdout from an osascript buildSendScript invocation.
+ * Returns { ok: true } if the send succeeded, or { ok: false, detail: string }
+ * if the AppleScript reported a runtime error or returned unexpected output.
+ *
+ * @param {string|null|undefined} stdout
+ * @returns {{ ok: boolean, detail?: string }}
+ */
+function parseOsascriptResult(stdout) {
+  const result = (stdout || '').trim()
+  if (result === 'ok') return { ok: true }
+  if (result.startsWith('error:')) {
+    return { ok: false, detail: result.slice(6, 406) }
+  }
+  return { ok: false, detail: result ? `unexpected result: ${result.slice(0, 400)}` : 'no output from osascript' }
+}
+
+module.exports = { escapeAppleScriptString, buildSendScript, parseOsascriptResult }
