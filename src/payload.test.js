@@ -116,16 +116,38 @@ test('normalizeRow: a corrupt/out-of-range date yields sent_at null (never throw
   assert.equal(p.sent_at, null)
 })
 
-test('normalizeRows: drops rows with no usable timestamp or sender handle', () => {
+test('normalizeRows: drops inbound rows with no usable timestamp or sender handle', () => {
   const rows = [
     baseRow({ rowid: 1 }),                       // keep
     baseRow({ rowid: 2, date: 9.99e30 }),        // drop: bad date → sent_at null
-    baseRow({ rowid: 3, handle: null }),         // drop: no sender handle
+    baseRow({ rowid: 3, handle: null }),         // drop: inbound, no sender handle
     baseRow({ rowid: 4, handle: 'x@y.com', chat_participants_concat: null }), // keep
   ]
   const kept = normalizeRows(rows)
   assert.deepEqual(kept.map(r => r.rowid), [1, 4])
   assert.equal(kept[1].chat_participants, null)
+})
+
+test('normalizeRows: KEEPS an outbound row even with a null handle', () => {
+  // chat.db sets message.handle_id = 0 for the owner's own sent messages, so the
+  // scanner's LEFT JOIN handle yields handle === null on every outbound row.
+  // Dropping those would discard the owner's first-touch outbound before it ever
+  // reaches filter.js — which is exactly the row filter.js is built to ship.
+  const kept = normalizeRows([
+    baseRow({ rowid: 10, is_from_me: 1, handle: null }),                 // keep (outbound)
+    baseRow({ rowid: 11, is_from_me: 0, handle: null }),                 // drop (inbound, no sender)
+    baseRow({ rowid: 12, is_from_me: 1, handle: null, date: 9.99e30 }),  // drop (outbound but bad date)
+  ])
+  assert.deepEqual(kept.map(r => r.rowid), [10])
+  assert.equal(kept[0].is_from_me, 1)
+  assert.equal(kept[0].handle, null)
+})
+
+test('normalizeRows: a truthy non-1 is_from_me still keeps a handle-less outbound row', () => {
+  // is_from_me is coerced to 1/0 in the row shape, so the filter must treat the
+  // normalized (post-coercion) flag — guard against a regression to raw values.
+  const kept = normalizeRows([baseRow({ rowid: 20, is_from_me: true, handle: null })])
+  assert.deepEqual(kept.map(r => r.rowid), [20])
 })
 
 test('normalizeRows: empty input yields empty output', () => {

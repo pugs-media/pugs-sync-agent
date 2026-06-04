@@ -67,15 +67,24 @@ function normalizeRow(r) {
 
 /**
  * Normalize a batch of raw rows, dropping any row that lacks a usable timestamp
- * or sender handle (the same guard scan.js applied inline). A row whose Apple
- * date is corrupt/out-of-range yields sent_at === null and is dropped here
- * rather than crashing the scan (see appledate.js).
+ * (a corrupt/out-of-range Apple date yields sent_at === null and is dropped here
+ * rather than crashing the scan — see appledate.js).
+ *
+ * The sender-handle requirement applies to INBOUND rows ONLY. chat.db stores
+ * `message.handle_id = 0` for the owner's own sent messages, so the scanner's
+ * `LEFT JOIN handle` yields handle === null on every outbound row. Dropping
+ * those here would discard the owner's outbound messages before they ever reach
+ * filter.js — which is the module that deliberately ships outbound 1:1s (the
+ * "first-touch" that auto-extends the prospect allowlist server-side) and gates
+ * outbound via the wrong-iCloud guard. So we keep handle-less rows when they're
+ * outbound (is_from_me) and let filter.js make the ship/drop call; inbound rows
+ * still need a sender handle (an inbound message with no sender can't be scoped).
  *
  * @param {object[]} rows
  * @returns {object[]} normalized, shippable rows
  */
 function normalizeRows(rows) {
-  return rows.map(normalizeRow).filter(r => r.sent_at && r.handle)
+  return rows.map(normalizeRow).filter(r => r.sent_at && (r.handle || r.is_from_me))
 }
 
 module.exports = { PARTICIPANT_SEPARATOR, parseParticipants, normalizeRow, normalizeRows }
