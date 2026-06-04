@@ -19,6 +19,7 @@ const { syncContacts } = require('./contacts')
 const { filterMessages } = require('./filter')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 const { normalizeRows } = require('./payload')
+const { loadState, saveState } = require('./state')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -50,16 +51,6 @@ if (!WEBHOOK_URL || !SECRET) {
 // ───────────────────────────────────────────────────────────────────────
 // Helpers
 
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'))
-  } catch {
-    return { last_rowid: 0 }
-  }
-}
-function saveState(state) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2))
-}
 
 /**
  * Copy chat.db (plus its WAL sidecars) to a temp file we can safely query.
@@ -121,7 +112,7 @@ async function main() {
     process.exit(5)
   }
 
-  const state = loadState()
+  const state = loadState(STATE_PATH)
   let cutoffRowid = state.last_rowid || 0
   let newDraftsThisRun = 0  // populated from /api/import/imessage response, used to trigger contacts sync
 
@@ -261,7 +252,7 @@ async function main() {
 
     // Only advance state if the POST succeeded
     const lastRowid = rows[rows.length - 1].rowid
-    saveState({ ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
+    saveState(STATE_PATH, { ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
     console.log(`Advanced state to ROWID ${lastRowid}`)
   } finally {
     if (db) db.close()
@@ -277,7 +268,7 @@ async function main() {
   //     to a 60s minimum throttle to avoid burst hammering on backlog catchup).
   //   - Otherwise fall back to the hourly cadence (handles renames in Connor's
   //     address book even when no new leads arrive).
-  const latestState = loadState()
+  const latestState = loadState(STATE_PATH)
   const lastContactsAt = latestState.last_contacts_at ? new Date(latestState.last_contacts_at).getTime() : 0
   const sinceLastSync = Date.now() - lastContactsAt
   const NEW_DRAFT_MIN_THROTTLE_MS = 60 * 1000  // 60s
@@ -293,7 +284,7 @@ async function main() {
       // Only advance the cadence on actual success — keep retrying if the
       // post failed or the AddressBook wasn't readable.
       if (res?.ok) {
-        saveState({ ...latestState, last_contacts_at: new Date().toISOString() })
+        saveState(STATE_PATH, { ...latestState, last_contacts_at: new Date().toISOString() })
       }
     } catch (e) {
       console.error('Contacts sync failed (non-fatal):', e.message || e)
