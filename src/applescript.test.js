@@ -2,7 +2,7 @@
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { escapeAppleScriptString, buildSendScript } = require('./applescript')
+const { escapeAppleScriptString, buildSendScript, parseOsascriptResult } = require('./applescript')
 
 test('escapeAppleScriptString: leaves a plain string untouched', () => {
   assert.equal(escapeAppleScriptString('+14155550100'), '+14155550100')
@@ -76,4 +76,65 @@ test('buildSendScript: a malicious handle cannot break out of the buddy literal'
   assert.ok(buddyLine.includes('\\"'), 'injected quote in handle should be escaped')
   // Still exactly one send statement — the handle did not introduce another.
   assert.equal((script.match(/\bsend "/g) || []).length, 1)
+})
+
+// --- Error-detection contract in buildSendScript ---
+
+test('buildSendScript: wraps send in try/on error and returns "ok" on success path', () => {
+  const script = buildSendScript({ to: '+14155550100', text: 'Hi', service: 'iMessage' })
+  assert.match(script, /\btry\b/)
+  assert.match(script, /return "ok"/)
+  assert.match(script, /on error errMsg number errNum/)
+  assert.match(script, /return "error:" & errNum & ":" & errMsg/)
+})
+
+test('buildSendScript: error return appears inside the on-error handler, not on the success path', () => {
+  const script = buildSendScript({ to: 'x', text: 'y' })
+  const lines = script.split('\n').map(l => l.trim())
+  const onErrorIdx = lines.findIndex(l => l.startsWith('on error'))
+  const returnOkIdx = lines.findIndex(l => l === 'return "ok"')
+  const returnErrIdx = lines.findIndex(l => l.startsWith('return "error:"'))
+  // "return ok" must come before the "on error" clause
+  assert.ok(returnOkIdx < onErrorIdx, '"return ok" should precede the on-error handler')
+  // error return must come after "on error"
+  assert.ok(returnErrIdx > onErrorIdx, '"return error:" should be inside on-error handler')
+})
+
+// --- parseOsascriptResult ---
+
+test('parseOsascriptResult: "ok" stdout → ok:true', () => {
+  assert.deepEqual(parseOsascriptResult('ok'), { ok: true })
+  assert.deepEqual(parseOsascriptResult('ok\n'), { ok: true })
+  assert.deepEqual(parseOsascriptResult('  ok  '), { ok: true })
+})
+
+test('parseOsascriptResult: "error:<code>:<msg>" stdout → ok:false with detail', () => {
+  const r = parseOsascriptResult('error:-1728:Can\'t get buddy "+1" of service')
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /-1728/)
+  assert.match(r.detail, /Can't get buddy/)
+})
+
+test('parseOsascriptResult: error detail is capped at 400 chars', () => {
+  const longErr = 'error:-9999:' + 'x'.repeat(500)
+  const r = parseOsascriptResult(longErr)
+  assert.equal(r.ok, false)
+  assert.ok(r.detail.length <= 400, 'detail must not exceed 400 chars')
+})
+
+test('parseOsascriptResult: empty stdout → ok:false with "no output" detail', () => {
+  const r = parseOsascriptResult('')
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /no output/)
+})
+
+test('parseOsascriptResult: null/undefined stdout → ok:false', () => {
+  assert.equal(parseOsascriptResult(null).ok, false)
+  assert.equal(parseOsascriptResult(undefined).ok, false)
+})
+
+test('parseOsascriptResult: unexpected non-error stdout → ok:false with "unexpected result"', () => {
+  const r = parseOsascriptResult('some random output')
+  assert.equal(r.ok, false)
+  assert.match(r.detail, /unexpected result/)
 })
