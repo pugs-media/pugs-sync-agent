@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -143,6 +143,118 @@ test('fetchProspectHandles: throws after all 3 attempts fail with network error'
   )
   assert.equal(calls, 3, 'should have attempted 3 times on repeated network errors')
 })
+
+// ── parseProspectHandles: shape validation ────────────────────────────────────
+
+test('parseProspectHandles: accepts valid phones and emails arrays', () => {
+  const result = parseProspectHandles({
+    phones: ['4155550100', '6505551234'],
+    emails: ['Lead@Example.com'],
+    count_phones: 2,
+    count_emails: 1,
+  })
+  assert.ok(result.phones.has('4155550100'))
+  assert.ok(result.phones.has('6505551234'))
+  assert.ok(result.emails.has('lead@example.com'), 'emails lowercased')
+  assert.equal(result.total, 3)
+})
+
+test('parseProspectHandles: treats absent phones/emails as empty sets', () => {
+  const result = parseProspectHandles({ count_phones: 0, count_emails: 0 })
+  assert.equal(result.phones.size, 0)
+  assert.equal(result.emails.size, 0)
+  assert.equal(result.total, 0)
+})
+
+test('parseProspectHandles: treats null phones as empty set', () => {
+  const result = parseProspectHandles({ phones: null, emails: [], count_phones: 0, count_emails: 0 })
+  assert.equal(result.phones.size, 0)
+})
+
+test('parseProspectHandles: treats null emails as empty set', () => {
+  const result = parseProspectHandles({ phones: [], emails: null, count_phones: 0, count_emails: 0 })
+  assert.equal(result.emails.size, 0)
+})
+
+test('parseProspectHandles: throws when phones is an object (not array)', () => {
+  assert.throws(
+    () => parseProspectHandles({ phones: { '0': '4155550100' }, emails: [] }),
+    /phones must be an array/,
+  )
+})
+
+test('parseProspectHandles: throws when phones is a string', () => {
+  assert.throws(
+    () => parseProspectHandles({ phones: '4155550100', emails: [] }),
+    /phones must be an array/,
+  )
+})
+
+test('parseProspectHandles: throws when emails is an object (not array)', () => {
+  assert.throws(
+    () => parseProspectHandles({ phones: [], emails: { '0': 'lead@example.com' } }),
+    /emails must be an array/,
+  )
+})
+
+test('parseProspectHandles: throws when response is null', () => {
+  assert.throws(
+    () => parseProspectHandles(null),
+    /not an object/,
+  )
+})
+
+test('parseProspectHandles: throws when response is an array (top-level)', () => {
+  assert.throws(
+    () => parseProspectHandles([{ phones: [] }]),
+    /not an object/,
+  )
+})
+
+test('parseProspectHandles: throws when response is a string', () => {
+  assert.throws(
+    () => parseProspectHandles('ok'),
+    /not an object/,
+  )
+})
+
+test('fetchProspectHandles: throws when cloud returns phones as a string (would silently create char-set)', async () => {
+  // A string phones value would silently build a Set of individual characters,
+  // matching nothing and dropping all prospect messages. Validate it is rejected.
+  const _fetch = async () => ({
+    ok: true,
+    json: async () => ({ phones: '4155550100,6505551234', emails: [], count_phones: 2, count_emails: 0 }),
+  })
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+    }),
+    /phones must be an array/,
+  )
+})
+
+test('fetchProspectHandles: throws when cloud returns emails as an object', async () => {
+  const _fetch = async () => ({
+    ok: true,
+    json: async () => ({ phones: [], emails: { 0: 'lead@example.com' }, count_phones: 0, count_emails: 1 }),
+  })
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+    }),
+    /emails must be an array/,
+  )
+})
+
+// ── fetchProspectHandles: calls _delay with increasing backoff between attempts ─
 
 test('fetchProspectHandles: calls _delay with increasing backoff between attempts', async () => {
   const delays = []

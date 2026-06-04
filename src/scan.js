@@ -68,6 +68,29 @@ function snapshotDb() {
 // ───────────────────────────────────────────────────────────────────────
 // Main
 
+/**
+ * Validates and parses the raw JSON body from the prospect-handles endpoint.
+ * Throws if the shape is wrong — a malformed response (e.g. phones:null or
+ * phones:{}) would otherwise silently zero out the allowlist, dropping all
+ * prospect messages with no error logged.
+ */
+function parseProspectHandles(j) {
+  if (!j || typeof j !== 'object' || Array.isArray(j)) {
+    throw new Error('prospect-handles response is not an object')
+  }
+  if (j.phones != null && !Array.isArray(j.phones)) {
+    throw new TypeError(`prospect-handles: phones must be an array, got ${typeof j.phones}`)
+  }
+  if (j.emails != null && !Array.isArray(j.emails)) {
+    throw new TypeError(`prospect-handles: emails must be an array, got ${typeof j.emails}`)
+  }
+  return {
+    phones: new Set(j.phones ?? []),
+    emails: new Set((j.emails ?? []).map(e => e.toLowerCase())),
+    total:  (j.count_phones || 0) + (j.count_emails || 0),
+  }
+}
+
 // Fetch the prospect-handle allowlist from pugs-sales. Returns
 // { phones: Set, emails: Set, total }. Retries up to MAX_PROSPECT_FETCH_TRIES
 // times with exponential backoff before throwing. Throws on persistent failure
@@ -89,11 +112,7 @@ async function fetchProspectHandles({
       })
       if (res.ok) {
         const j = await res.json()
-        return {
-          phones: new Set(j.phones || []),
-          emails: new Set((j.emails || []).map(e => e.toLowerCase())),
-          total:  (j.count_phones || 0) + (j.count_emails || 0),
-        }
+        return parseProspectHandles(j)
       }
       const errText = (await res.text()).slice(0, 200)
       lastError = new Error(`prospect-handles ${res.status}: ${errText}`)
@@ -313,4 +332,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles }
+module.exports = { fetchProspectHandles, parseProspectHandles }
