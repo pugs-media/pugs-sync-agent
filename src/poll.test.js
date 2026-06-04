@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { processBatch } = require('./poll')
+const { processBatch, reportOutcome } = require('./poll')
 
 const noop = () => {}
 const asyncNoop = async () => {}
@@ -122,4 +122,74 @@ test('processBatch: mixed batch processes all items in order', async () => {
     { id: 'fail-1', status: 'failed' },
     // drop: no reportOutcome call
   ])
+})
+
+// ---------------------------------------------------------------------------
+// reportOutcome retry behaviour
+// ---------------------------------------------------------------------------
+
+const noDelay = async () => {}
+
+function okResponse() { return { ok: true, text: async () => '' } }
+function errResponse(status = 503) { return { ok: false, text: async () => `error ${status}` } }
+
+test('reportOutcome: succeeds on first attempt — single fetch call', async () => {
+  let calls = 0
+  await reportOutcome('id-1', { status: 'sent' }, {
+    _fetch: async () => { calls++; return okResponse() },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 1)
+})
+
+test('reportOutcome: retries on HTTP error and succeeds on second attempt', async () => {
+  let calls = 0
+  await reportOutcome('id-2', { status: 'sent' }, {
+    _fetch: async () => { calls++; return calls === 1 ? errResponse() : okResponse() },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, 'should retry once after HTTP error')
+})
+
+test('reportOutcome: retries on network throw and succeeds on second attempt', async () => {
+  let calls = 0
+  await reportOutcome('id-3', { status: 'sent' }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) throw new Error('network timeout')
+      return okResponse()
+    },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, 'should retry once after network throw')
+})
+
+test('reportOutcome: exhausts all retries and does not throw (log-and-swallow)', async () => {
+  let calls = 0
+  let threw = false
+  try {
+    await reportOutcome('id-4', { status: 'sent' }, {
+      _fetch: async () => { calls++; return errResponse() },
+      _delay: noDelay,
+    })
+  } catch {
+    threw = true
+  }
+  assert.equal(threw, false, 'exhausted retries must not propagate an error')
+  assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times')
+})
+
+test('reportOutcome: exhausts retries on repeated network throws without throwing', async () => {
+  let calls = 0
+  let threw = false
+  try {
+    await reportOutcome('id-5', { status: 'sent' }, {
+      _fetch: async () => { calls++; throw new Error('ECONNREFUSED') },
+      _delay: noDelay,
+    })
+  } catch {
+    threw = true
+  }
+  assert.equal(threw, false, 'exhausted network errors must not propagate')
+  assert.equal(calls, 3)
 })
