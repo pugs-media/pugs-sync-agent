@@ -58,18 +58,34 @@ async function fetchPendingBatch() {
   return Array.isArray(j.items) ? j.items : []
 }
 
-async function reportOutcome(id, payload) {
-  const res = await fetch(`${API_BASE}/api/sync/outbound-queue/${id}`, {
-    method:  'POST',
-    headers: {
-      'Content-Type':       'application/json',
-      'x-pugs-sync-secret': SECRET,
-      'x-pugs-scanner-id':  SCANNER_ID,
-    },
-    body:    JSON.stringify(payload),
-  })
-  if (!res.ok) {
-    log(`report-outcome ${id} failed: ${res.status} ${(await res.text()).slice(0, 200)}`)
+// Retries up to MAX_REPORT_TRIES times (exponential backoff) before logging and swallowing.
+// Prevents a transient cloud hiccup from leaving a 'sent' item stuck as 'pending',
+// which would cause the next poll cycle to dispatch it again as a duplicate iMessage.
+const MAX_REPORT_TRIES = 3
+
+async function reportOutcome(id, payload, {
+  _fetch = fetch,
+  _delay = (ms) => new Promise(r => setTimeout(r, ms)),
+} = {}) {
+  for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
+    try {
+      const res = await _fetch(`${API_BASE}/api/sync/outbound-queue/${id}`, {
+        method:  'POST',
+        headers: {
+          'Content-Type':       'application/json',
+          'x-pugs-sync-secret': SECRET,
+          'x-pugs-scanner-id':  SCANNER_ID,
+        },
+        body: JSON.stringify(payload),
+      })
+      if (res.ok) return
+      const errText = (await res.text()).slice(0, 200)
+      if (attempt < MAX_REPORT_TRIES) { await _delay(500 * attempt); continue }
+      log(`report-outcome ${id} failed after ${MAX_REPORT_TRIES} attempts: ${res.status} ${errText}`)
+    } catch (e) {
+      if (attempt < MAX_REPORT_TRIES) { await _delay(500 * attempt); continue }
+      log(`report-outcome ${id} network error after ${MAX_REPORT_TRIES} attempts: ${e.message || e}`)
+    }
   }
 }
 
@@ -160,4 +176,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { processBatch }
+module.exports = { processBatch, reportOutcome }
