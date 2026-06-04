@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { processBatch, reportOutcome } = require('./poll')
+const { processBatch, reportOutcome, fetchPendingBatch } = require('./poll')
 
 const noop = () => {}
 const asyncNoop = async () => {}
@@ -177,6 +177,54 @@ test('reportOutcome: exhausts all retries and does not throw (log-and-swallow)',
   }
   assert.equal(threw, false, 'exhausted retries must not propagate an error')
   assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times')
+})
+
+// ---------------------------------------------------------------------------
+// fetchPendingBatch
+// ---------------------------------------------------------------------------
+
+test('fetchPendingBatch: returns items array on success', async () => {
+  const items = [{ id: 'q1', to_handle: '+14155550100', body: 'hello', attempts: 0 }]
+  const result = await fetchPendingBatch({
+    _fetch: async () => ({ ok: true, json: async () => ({ items }), text: async () => '' }),
+  })
+  assert.deepEqual(result, items)
+})
+
+test('fetchPendingBatch: returns empty array when items field is absent or non-array', async () => {
+  const result = await fetchPendingBatch({
+    _fetch: async () => ({ ok: true, json: async () => ({}), text: async () => '' }),
+  })
+  assert.deepEqual(result, [])
+})
+
+test('fetchPendingBatch: throws with status on HTTP error', async () => {
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => ({ ok: false, status: 503, text: async () => 'gateway timeout' }),
+    }),
+    /queue GET 503/,
+  )
+})
+
+test('fetchPendingBatch: throws descriptive error when HTTP 200 body is not valid JSON', async () => {
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => ({
+        ok: true,
+        json: async () => { throw new SyntaxError('Unexpected token <') },
+        text: async () => '',
+      }),
+    }),
+    /queue GET 200 bad JSON/,
+  )
+})
+
+test('fetchPendingBatch: propagates network errors unchanged', async () => {
+  await assert.rejects(
+    () => fetchPendingBatch({ _fetch: async () => { throw new Error('ECONNREFUSED') } }),
+    /ECONNREFUSED/,
+  )
 })
 
 test('reportOutcome: exhausts retries on repeated network throws without throwing', async () => {

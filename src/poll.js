@@ -47,14 +47,19 @@ function log(...args) {
   console.log(new Date().toISOString(), ...args)
 }
 
-async function fetchPendingBatch() {
-  const res = await fetch(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
+async function fetchPendingBatch({ _fetch = fetch } = {}) {
+  const res = await _fetch(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
     headers: { 'x-pugs-sync-secret': SECRET, 'x-pugs-scanner-id': SCANNER_ID },
   })
   if (!res.ok) {
     throw new Error(`queue GET ${res.status}: ${(await res.text()).slice(0, 300)}`)
   }
-  const j = await res.json()
+  let j
+  try {
+    j = await res.json()
+  } catch (e) {
+    throw new Error(`queue GET 200 bad JSON: ${e.message}`)
+  }
   return Array.isArray(j.items) ? j.items : []
 }
 
@@ -176,4 +181,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { processBatch, reportOutcome }
+module.exports = { processBatch, reportOutcome, fetchPendingBatch }
