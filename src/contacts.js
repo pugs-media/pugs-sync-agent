@@ -26,6 +26,8 @@ const path = require('path')
 const Database = require('better-sqlite3')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 
+const MAX_CONTACTS_POST_TRIES = 3
+
 const SOURCES_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'AddressBook', 'Sources')
 
 function findAddressBooks() {
@@ -144,14 +146,58 @@ function dedupeContacts({ phones = [], emails = [] } = {}) {
 }
 
 /**
+ * POST contacts payload to the cloud with retry. Mirrors postToWebhook in
+ * scan.js: retries up to MAX_CONTACTS_POST_TRIES times on 5xx / network
+ * errors; throws immediately on 4xx (permanent — bad secret, bad request).
+ * Returns the Response on success.
+ *
+ * Injectable _fetch / _delay allow deterministic unit testing.
+ */
+async function postContactsPayload(url, body, {
+  _fetch    = fetch,
+  _delay    = (ms) => new Promise(r => setTimeout(r, ms)),
+  secret,
+  scannerId = '',
+} = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= MAX_CONTACTS_POST_TRIES; attempt++) {
+    let res
+    try {
+      res = await _fetch(url, {
+        method:  'POST',
+        headers: {
+          'Content-Type':       'application/json',
+          'x-pugs-sync-secret': secret,
+          'x-pugs-scanner-id':  scannerId,
+        },
+        body: JSON.stringify(body),
+      })
+    } catch (e) {
+      lastError = e
+      if (attempt < MAX_CONTACTS_POST_TRIES) await _delay(500 * attempt)
+      continue
+    }
+    if (res.ok) return res
+    const errText = (await res.text()).slice(0, 500)
+    const err = new Error(`contacts webhook ${res.status}: ${errText}`)
+    if (res.status >= 400 && res.status < 500) throw err
+    lastError = err
+    if (attempt < MAX_CONTACTS_POST_TRIES) await _delay(500 * attempt)
+  }
+  throw lastError
+}
+
+/**
  * Sync Mac contacts to pugs-sales. Returns counts. Throws on hard errors.
  *
  * @param {object} opts
  * @param {string} opts.webhookBase - https://pugs-sales.vercel.app (no path)
  * @param {string} opts.secret      - PUGS_SYNC_SECRET
  * @param {string} [opts.scannerId] - PUGS_SCANNER_ID (sent as x-pugs-scanner-id)
+ * @param {function} [opts._fetch]  - injectable fetch (tests)
+ * @param {function} [opts._delay]  - injectable delay (tests)
  */
-async function syncContacts({ webhookBase, secret, scannerId = '' }) {
+async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)) }) {
   const books = findAddressBooks()
   if (!books.length) {
     // Still POST an empty payload so the server-side heartbeat records
@@ -189,19 +235,12 @@ async function syncContacts({ webhookBase, secret, scannerId = '' }) {
     // Canonicalize + union across all sources (pure + unit-tested).
     const payload = dedupeContacts({ phones: rawPhones, emails: rawEmails })
 
-    const resp = await fetch(`${webhookBase}/api/sync/contacts`, {
-      method:  'POST',
-      headers: {
-        'Content-Type':       'application/json',
-        'x-pugs-sync-secret': secret,
-        'x-pugs-scanner-id':  scannerId,
-      },
-      body: JSON.stringify(payload),
-    })
+    const resp = await postContactsPayload(
+      `${webhookBase}/api/sync/contacts`,
+      payload,
+      { _fetch, _delay, secret, scannerId },
+    )
     const text = await resp.text()
-    if (!resp.ok) {
-      throw new Error(`contacts webhook failed ${resp.status}: ${text.slice(0, 500)}`)
-    }
     return {
       ok: true,
       sent: { phones: payload.phones.length, emails: payload.emails.length },
@@ -216,4 +255,4 @@ async function syncContacts({ webhookBase, secret, scannerId = '' }) {
   }
 }
 
-module.exports = { syncContacts, findAddressBooks, snapshot, extractFromDb, buildName, dedupeContacts }
+module.exports = { syncContacts, postContactsPayload, findAddressBooks, snapshot, extractFromDb, buildName, dedupeContacts }
