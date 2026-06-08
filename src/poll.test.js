@@ -341,6 +341,20 @@ test('dispatchToLocalSender: aborts and throws AbortError after _timeoutMs', asy
   )
 })
 
+test('dispatchToLocalSender: throws descriptive error when 200 OK body is not valid JSON', async () => {
+  const item = { id: '5', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+  await assert.rejects(
+    () => dispatchToLocalSender(item, {
+      _fetch: async () => ({
+        ok: true,
+        json: async () => { throw new SyntaxError('Unexpected token o') },
+        text: async () => '',
+      }),
+    }),
+    /local send 200 malformed JSON/,
+  )
+})
+
 test('dispatchToLocalSender: timeout fires even if fetch resolves just before it', async () => {
   // Verifies clearTimeout runs in the finally block; timer must not keep the
   // test process open after a successful dispatch.
