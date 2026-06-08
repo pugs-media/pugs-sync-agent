@@ -307,12 +307,12 @@ test('postContactsPayload: uses increasing backoff between retries', async () =>
 })
 
 // ── syncContacts: no-address-books branch ────────────────────────────────────
-// These tests were only possible to write after the bare-fetch bug was fixed:
-// the no-address-books branch was using the global `fetch` directly instead of
-// the injected `_fetch`, so the mock never fired and tests would hit the real
-// network (or throw ReferenceError in envs without a global fetch).
+// These tests use _findAddressBooks injection to deterministically drive the
+// no-books path on any host — no longer reliant on CI lacking AddressBook.
 
-test('syncContacts: posts empty payload with agent_note when no address books are found', async () => {
+const NO_BOOKS = { _findAddressBooks: () => [], _delay: async () => {} }
+
+test('syncContacts: posts empty payload with agent_note when no address books found', async () => {
   let capturedUrl, capturedBody, capturedHeaders
   const result = await syncContacts({
     webhookBase: 'https://example.pugs.media',
@@ -324,89 +324,53 @@ test('syncContacts: posts empty payload with agent_note when no address books ar
       capturedHeaders = opts.headers
       return { ok: true, text: async () => '{"ok":true}' }
     },
-    _findAddressBooks: () => [],
+    ...NO_BOOKS,
   })
-
-  // Can't test _findAddressBooks injection without refactor; instead verify
-  // via the real findAddressBooks path (no SOURCES_DIR on test host) — the
-  // snapshot dir doesn't exist in CI so findAddressBooks returns [].
-  // We re-test below with a direct call that confirms _fetch is used.
+  assert.equal(capturedUrl, 'https://example.pugs.media/api/sync/contacts')
+  assert.equal(capturedBody.agent_note, 'no_address_books_found')
+  assert.deepEqual(capturedBody.phones, [])
+  assert.deepEqual(capturedBody.emails, [])
+  assert.equal(capturedHeaders['x-pugs-sync-secret'], 'test-secret')
+  assert.equal(capturedHeaders['x-pugs-scanner-id'], 'test-scanner')
+  assert.ok(result.ok)
+  assert.equal(result.skipped, 'no_address_books_found')
 })
 
-test('syncContacts no-address-books: _fetch injection works (was bare fetch before fix)', async () => {
-  // This test would have failed before the fix because the no-address-books
-  // branch called `fetch` (global) instead of `_fetch`, so the mock was ignored.
-  // Now it verifies the injected mock is actually called in that branch.
-  //
-  // To drive the no-address-books path without mocking fs, we call syncContacts
-  // with a webhookBase that can't exist; when findAddressBooks returns [] (true
-  // on CI where ~/Library/Application Support/AddressBook/Sources doesn't exist)
-  // the injected _fetch must be called. On Connor's Mac where the dir exists
-  // this test falls through to the books path — still safe (mock returns ok:true).
+test('syncContacts no-address-books: returns ok:false when POST throws (non-fatal)', async () => {
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _fetch: async () => { throw new Error('ECONNRESET') },
+    ...NO_BOOKS,
+  })
+  assert.equal(result.ok, false)
+  assert.ok(result.error, 'error message must be present')
+  assert.ok(result.error.includes('ECONNRESET'))
+  assert.equal(result.skipped, 'no_address_books_found_and_post_failed')
+})
+
+test('syncContacts no-address-books: returns ok result on POST success', async () => {
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _fetch: async () => ({ ok: true, status: 200, text: async () => '{"enriched":5}' }),
+    ...NO_BOOKS,
+  })
+  assert.ok(result.ok)
+  assert.equal(result.skipped, 'no_address_books_found')
+  assert.equal(result.server_status, 200)
+})
+
+test('syncContacts no-address-books: uses _fetch not bare global fetch', async () => {
   let fetchCalled = false
   await syncContacts({
     webhookBase: 'https://example.pugs.media',
     secret: 'test-secret',
     scannerId: '',
-    _fetch: async (url, opts) => {
-      fetchCalled = true
-      const body = JSON.parse(opts.body)
-      // If we hit the no-books branch, body must contain agent_note
-      if (body.agent_note) {
-        assert.equal(body.agent_note, 'no_address_books_found')
-        assert.deepEqual(body.phones, [])
-        assert.deepEqual(body.emails, [])
-        assert.equal(url, 'https://example.pugs.media/api/sync/contacts')
-        assert.equal(opts.headers['x-pugs-sync-secret'], 'test-secret')
-      }
-      return { ok: true, text: async () => '{"ok":true}' }
-    },
-    _delay: async () => {},
+    _fetch: async () => { fetchCalled = true; return { ok: true, text: async () => '{}' } },
+    ...NO_BOOKS,
   })
-  // On any host, _fetch must have been called at least once (either the
-  // no-books branch or the books branch — both now use the injected _fetch).
-  assert.ok(fetchCalled, '_fetch must be called — not the bare global fetch')
-})
-
-test('syncContacts no-address-books: returns ok result when POST succeeds', async () => {
-  // Only meaningful when findAddressBooks() returns [] (CI / no AddressBook).
-  // On Connor's Mac the books branch runs instead; that path is a no-op for
-  // this assertion. The assertion is still valid either way — ok must be set.
-  const result = await syncContacts({
-    webhookBase: 'https://example.pugs.media',
-    secret: 'test-secret',
-    scannerId: '',
-    _fetch: async () => ({ ok: true, text: async () => '{"enriched":5}' }),
-    _delay: async () => {},
-  })
-  // result.ok is true in both the no-books and books branches on success
-  assert.ok(result && result.ok !== false, 'syncContacts should return ok result on successful POST')
-})
-
-test('syncContacts no-address-books: returns ok:false when POST throws (non-fatal)', async () => {
-  // When the POST itself throws (e.g. network down), the no-address-books branch
-  // catches and returns { ok: false } instead of propagating — agent keeps running.
-  // This path was also untestable before the fix (bare fetch ignored the mock).
-  //
-  // If this machine has AddressBooks, the books branch runs, postContactsPayload
-  // throws (not caught here), and this test gets an unhandled rejection —
-  // so we only assert the no-throw contract, not the exact return shape.
-  let threw = false
-  try {
-    await syncContacts({
-      webhookBase: 'https://example.pugs.media',
-      secret: 'test-secret',
-      scannerId: '',
-      _fetch: async () => { throw new Error('ECONNRESET') },
-      _delay: async () => {},
-    })
-  } catch {
-    threw = true
-  }
-  // On CI (no AddressBook): catch swallows the error → threw stays false.
-  // On Connor's Mac (books exist): postContactsPayload re-throws after retries.
-  // We just verify the function doesn't crash the process in either case — the
-  // non-fatal contract is enforced by the caller (scan.js catches syncContacts).
-  // So we don't assert threw — both outcomes are valid depending on environment.
-  assert.ok(true, 'syncContacts must not crash the process regardless of network errors')
+  assert.ok(fetchCalled, '_fetch injection must be called (not bare global fetch)')
 })
