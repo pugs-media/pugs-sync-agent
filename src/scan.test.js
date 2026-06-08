@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -269,4 +269,112 @@ test('fetchProspectHandles: calls _delay with increasing backoff between attempt
     }),
   )
   assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms (500 * attempt)')
+})
+
+// ── postToWebhook: retry behaviour ────────────────────────────────────────────
+
+const WEBHOOK_URL_TEST = 'https://example.pugs.media/api/import/imessage'
+const WEBHOOK_OPTS     = { webhookUrl: WEBHOOK_URL_TEST, secret: 'test-secret', scannerId: '' }
+
+test('postToWebhook: returns response on first successful POST', async () => {
+  let calls = 0
+  const res = await postToWebhook({ messages: [] }, {
+    _fetch: async () => { calls++; return { ok: true, text: async () => '{"ok":true}' } },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 1)
+  assert.equal(res.ok, true)
+})
+
+test('postToWebhook: retries on 503 and succeeds on second attempt', async () => {
+  let calls = 0
+  await postToWebhook({ messages: [] }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 503, text: async () => 'Service Unavailable' }
+      return { ok: true, text: async () => '{"ok":true}' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on 5xx and succeed')
+})
+
+test('postToWebhook: retries on network error and succeeds on second attempt', async () => {
+  let calls = 0
+  await postToWebhook({ messages: [] }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { ok: true, text: async () => '{"ok":true}' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on network error and succeed')
+})
+
+test('postToWebhook: throws immediately on 401 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 401, text: async () => 'unauthorized' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 401/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('postToWebhook: throws immediately on 403 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 403, text: async () => 'forbidden' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 403/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('postToWebhook: throws after all 3 retries exhausted on 503', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 503, text: async () => 'err' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 503/,
+  )
+  assert.equal(calls, 3, 'should try exactly MAX_WEBHOOK_POST_TRIES times')
+})
+
+test('postToWebhook: throws after all 3 retries exhausted on network error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch: async () => { calls++; throw new Error('ECONNRESET') },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /ECONNRESET/,
+  )
+  assert.equal(calls, 3, 'should try exactly MAX_WEBHOOK_POST_TRIES times')
+})
+
+test('postToWebhook: uses increasing backoff between retries', async () => {
+  const delays = []
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch: async () => ({ ok: false, status: 503, text: async () => 'err' }),
+      _delay: async (ms) => { delays.push(ms) },
+      ...WEBHOOK_OPTS,
+    }),
+  )
+  assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms')
 })
