@@ -204,7 +204,7 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
     // "agent is alive, found no AddressBook sources at the expected path"
     // — otherwise we have zero visibility on whether the agent ran at all.
     try {
-      const resp = await fetch(`${webhookBase}/api/sync/contacts`, {
+      const resp = await _fetch(`${webhookBase}/api/sync/contacts`, {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
