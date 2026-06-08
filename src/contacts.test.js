@@ -411,6 +411,47 @@ test('syncContacts no-address-books: uses _fetch not bare global fetch', async (
   assert.ok(fetchCalled, '_fetch injection must be called (not bare global fetch)')
 })
 
+// ── syncContacts: _findAddressBooks throws (e.g. EACCES) ─────────────────────
+// If the AddressBook Sources directory exists but is not readable, findAddressBooks
+// throws EACCES. syncContacts must not propagate that — it should degrade to the
+// no-books path so the server still receives a heartbeat and the scan loop continues.
+
+test('syncContacts: does not throw when _findAddressBooks throws EACCES', async () => {
+  const eaccesError = Object.assign(new Error('EACCES: permission denied, scandir \'/Users/test/Library/Application Support/AddressBook/Sources\''), { code: 'EACCES' })
+  let postCalled = false
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _findAddressBooks: () => { throw eaccesError },
+    _fetch: async (_url, opts) => {
+      postCalled = true
+      return { ok: true, status: 200, text: async () => '{"ok":true}' }
+    },
+    _delay: async () => {},
+  })
+  assert.ok(postCalled, 'should still POST a no-books heartbeat after the error')
+  assert.ok(result.skipped, 'should return a skipped result, not throw')
+})
+
+test('syncContacts: falls back to no-books POST when _findAddressBooks throws any error', async () => {
+  let capturedBody
+  await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _findAddressBooks: () => { throw new Error('unexpected FS error') },
+    _fetch: async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, text: async () => '{}' }
+    },
+    _delay: async () => {},
+  })
+  assert.deepEqual(capturedBody.phones, [], 'fallback POST must have empty phones')
+  assert.deepEqual(capturedBody.emails, [], 'fallback POST must have empty emails')
+  assert.equal(capturedBody.agent_note, 'no_address_books_found')
+})
+
 // ── fetch timeout: postContactsPayload / syncContacts ─────────────────────────
 // A slow or hung cloud must not stall the contacts-sync path indefinitely.
 
