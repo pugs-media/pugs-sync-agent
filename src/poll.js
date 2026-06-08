@@ -34,6 +34,10 @@ const SENDER_PORT      = parseInt(process.env.SENDER_PORT      || '7890', 10)
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '5000', 10)
 const MAX_ATTEMPTS     = parseInt(process.env.MAX_ATTEMPTS     || '5',    10)
 
+// send.js has a 15 s osascript timeout; 20 s gives it headroom while still
+// bounding the window where a hung sender stalls the entire poller loop.
+const DISPATCH_TIMEOUT_MS = 20_000
+
 if (!WEBHOOK_URL || !SECRET) {
   console.error('Missing PUGS_SYNC_WEBHOOK_URL or PUGS_SYNC_SECRET in .env')
   process.exit(2)
@@ -94,18 +98,25 @@ async function reportOutcome(id, payload, {
   }
 }
 
-async function dispatchToLocalSender(item) {
+async function dispatchToLocalSender(item, { _fetch = fetch, _timeoutMs = DISPATCH_TIMEOUT_MS } = {}) {
   // item: { id, to_handle, body, attempts }
-  const res = await fetch(`http://127.0.0.1:${SENDER_PORT}/send`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json', 'x-pugs-sync-secret': SECRET },
-    body:    JSON.stringify({ to: item.to_handle, text: item.body, service: 'iMessage' }),
-  })
-  if (!res.ok) {
-    const errText = await res.text()
-    throw new Error(`local send ${res.status}: ${errText.slice(0, 400)}`)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), _timeoutMs)
+  try {
+    const res = await _fetch(`http://127.0.0.1:${SENDER_PORT}/send`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'x-pugs-sync-secret': SECRET },
+      body:    JSON.stringify({ to: item.to_handle, text: item.body, service: 'iMessage' }),
+      signal:  controller.signal,
+    })
+    if (!res.ok) {
+      const errText = await res.text()
+      throw new Error(`local send ${res.status}: ${errText.slice(0, 400)}`)
+    }
+    return res.json()
+  } finally {
+    clearTimeout(timer)
   }
-  return res.json()
 }
 
 /**
@@ -181,4 +192,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { processBatch, reportOutcome, fetchPendingBatch }
+module.exports = { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender }
