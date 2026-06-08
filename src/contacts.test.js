@@ -7,7 +7,7 @@ const os = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 
-const { snapshot, extractFromDb, buildName, dedupeContacts } = require('./contacts')
+const { snapshot, extractFromDb, buildName, dedupeContacts, postContactsPayload } = require('./contacts')
 
 // Each test gets its own scratch dir so parallel runs don't collide.
 let dir
@@ -192,4 +192,116 @@ test('dedupeContacts: phone canonical key matches the scanner allowlist key (fil
   const keyDigits = out.phones[0].phone.replace(/\D/g, '').slice(-10)
   const allowed = makeHandleAllowed({ phones: new Set([keyDigits]), emails: new Set() })
   assert.ok(allowed('14155550100'), 'same number in a different format must match the canonical key')
+})
+
+// ── postContactsPayload: retry behaviour ──────────────────────────────────────
+// These mirror the postToWebhook tests in scan.test.js — same 3-attempt /
+// exponential-backoff / 4xx-no-retry contract, applied to the contacts POST.
+
+const NOOP_DELAY = async () => {}
+const CONTACTS_URL = 'https://example.pugs.media/api/sync/contacts'
+const CONTACTS_OPTS = { secret: 'test-secret', scannerId: '' }
+
+test('postContactsPayload: returns response on first successful POST', async () => {
+  let calls = 0
+  const res = await postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+    _fetch: async () => { calls++; return { ok: true, text: async () => '{"ok":true}' } },
+    _delay: NOOP_DELAY,
+    ...CONTACTS_OPTS,
+  })
+  assert.equal(calls, 1)
+  assert.equal(res.ok, true)
+})
+
+test('postContactsPayload: retries on 503 and succeeds on second attempt', async () => {
+  let calls = 0
+  const res = await postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 503, text: async () => 'Service Unavailable' }
+      return { ok: true, text: async () => '{"ok":true}' }
+    },
+    _delay: NOOP_DELAY,
+    ...CONTACTS_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on 5xx and succeed')
+  assert.equal(res.ok, true)
+})
+
+test('postContactsPayload: retries on network error and succeeds on second attempt', async () => {
+  let calls = 0
+  await postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { ok: true, text: async () => '{"ok":true}' }
+    },
+    _delay: NOOP_DELAY,
+    ...CONTACTS_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on network error and succeed')
+})
+
+test('postContactsPayload: throws immediately on 401 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 401, text: async () => 'unauthorized' } },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /contacts webhook 401/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('postContactsPayload: throws immediately on 403 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 403, text: async () => 'forbidden' } },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /contacts webhook 403/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('postContactsPayload: throws after all 3 retries exhausted on 503', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 503, text: async () => 'err' } },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /contacts webhook 503/,
+  )
+  assert.equal(calls, 3, 'should try exactly 3 times before throwing')
+})
+
+test('postContactsPayload: throws after all 3 retries exhausted on network error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; throw new Error('ECONNRESET') },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /ECONNRESET/,
+  )
+  assert.equal(calls, 3, 'should try exactly 3 times on repeated network errors')
+})
+
+test('postContactsPayload: uses increasing backoff between retries', async () => {
+  const delays = []
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => ({ ok: false, status: 503, text: async () => 'err' }),
+      _delay: async (ms) => { delays.push(ms) },
+      ...CONTACTS_OPTS,
+    }),
+  )
+  assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms (500 * attempt)')
 })
