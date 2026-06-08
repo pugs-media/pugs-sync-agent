@@ -198,13 +198,93 @@ test('fetchPendingBatch: returns empty array when items field is absent or non-a
   assert.deepEqual(result, [])
 })
 
-test('fetchPendingBatch: throws with status on HTTP error', async () => {
+test('fetchPendingBatch: throws after all 3 retries exhausted on 5xx', async () => {
+  let calls = 0
   await assert.rejects(
     () => fetchPendingBatch({
-      _fetch: async () => ({ ok: false, status: 503, text: async () => 'gateway timeout' }),
+      _fetch: async () => { calls++; return { ok: false, status: 503, text: async () => 'gateway timeout' } },
+      _delay: noDelay,
     }),
     /queue GET 503/,
   )
+  assert.equal(calls, 3, 'should try exactly 3 times before throwing')
+})
+
+test('fetchPendingBatch: retries on 503 and succeeds on second attempt', async () => {
+  let calls = 0
+  const items = [{ id: 'q1', to_handle: '+14155550100', body: 'hi', attempts: 0 }]
+  const result = await fetchPendingBatch({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 503, text: async () => 'Service Unavailable' }
+      return { ok: true, json: async () => ({ items }) }
+    },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, 'should retry once on 5xx and succeed')
+  assert.deepEqual(result, items)
+})
+
+test('fetchPendingBatch: retries on network error and succeeds on second attempt', async () => {
+  let calls = 0
+  const items = [{ id: 'q2', to_handle: '+12025550199', body: 'hey', attempts: 0 }]
+  const result = await fetchPendingBatch({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { ok: true, json: async () => ({ items }) }
+    },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, 'should retry once on network error and succeed')
+  assert.deepEqual(result, items)
+})
+
+test('fetchPendingBatch: throws after all 3 retries exhausted on repeated network error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => { calls++; throw new Error('ECONNREFUSED') },
+      _delay: noDelay,
+    }),
+    /ECONNREFUSED/,
+  )
+  assert.equal(calls, 3, 'should try exactly 3 times on repeated network errors')
+})
+
+test('fetchPendingBatch: throws immediately on 401 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => { calls++; return { ok: false, status: 401, text: async () => 'unauthorized' } },
+      _delay: noDelay,
+    }),
+    /queue GET 401/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('fetchPendingBatch: throws immediately on 403 — permanent, no retry', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => { calls++; return { ok: false, status: 403, text: async () => 'forbidden' } },
+      _delay: noDelay,
+    }),
+    /queue GET 403/,
+  )
+  assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('fetchPendingBatch: uses increasing backoff between retries', async () => {
+  const delays = []
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => ({ ok: false, status: 503, text: async () => 'err' }),
+      _delay: async (ms) => { delays.push(ms) },
+    }),
+  )
+  assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms (500 * attempt)')
 })
 
 test('fetchPendingBatch: throws descriptive error when HTTP 200 body is not valid JSON', async () => {
@@ -217,13 +297,6 @@ test('fetchPendingBatch: throws descriptive error when HTTP 200 body is not vali
       }),
     }),
     /queue GET 200 bad JSON/,
-  )
-})
-
-test('fetchPendingBatch: propagates network errors unchanged', async () => {
-  await assert.rejects(
-    () => fetchPendingBatch({ _fetch: async () => { throw new Error('ECONNREFUSED') } }),
-    /ECONNREFUSED/,
   )
 })
 

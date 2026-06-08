@@ -51,20 +51,45 @@ function log(...args) {
   console.log(new Date().toISOString(), ...args)
 }
 
-async function fetchPendingBatch({ _fetch = fetch } = {}) {
-  const res = await _fetch(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
-    headers: { 'x-pugs-sync-secret': SECRET, 'x-pugs-scanner-id': SCANNER_ID },
-  })
-  if (!res.ok) {
-    throw new Error(`queue GET ${res.status}: ${(await res.text()).slice(0, 300)}`)
+// Retries up to MAX_FETCH_TRIES times on 5xx and network errors; throws
+// immediately on 4xx (permanent: bad secret, bad request — no point retrying).
+// Matches the retry contract of postToWebhook, reportOutcome, and
+// postContactsPayload so a transient Vercel cold-start doesn't drop the
+// entire poll cycle.
+const MAX_QUEUE_FETCH_TRIES = 3
+
+async function fetchPendingBatch({
+  _fetch = fetch,
+  _delay = (ms) => new Promise(r => setTimeout(r, ms)),
+} = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= MAX_QUEUE_FETCH_TRIES; attempt++) {
+    let res
+    try {
+      res = await _fetch(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
+        headers: { 'x-pugs-sync-secret': SECRET, 'x-pugs-scanner-id': SCANNER_ID },
+      })
+    } catch (e) {
+      lastError = e
+      if (attempt < MAX_QUEUE_FETCH_TRIES) await _delay(500 * attempt)
+      continue
+    }
+    if (res.ok) {
+      let j
+      try {
+        j = await res.json()
+      } catch (e) {
+        throw new Error(`queue GET 200 bad JSON: ${e.message}`)
+      }
+      return Array.isArray(j.items) ? j.items : []
+    }
+    const errText = (await res.text()).slice(0, 300)
+    const err = new Error(`queue GET ${res.status}: ${errText}`)
+    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    lastError = err
+    if (attempt < MAX_QUEUE_FETCH_TRIES) await _delay(500 * attempt)
   }
-  let j
-  try {
-    j = await res.json()
-  } catch (e) {
-    throw new Error(`queue GET 200 bad JSON: ${e.message}`)
-  }
-  return Array.isArray(j.items) ? j.items : []
+  throw lastError
 }
 
 // Retries up to MAX_REPORT_TRIES times (exponential backoff) before logging and swallowing.
