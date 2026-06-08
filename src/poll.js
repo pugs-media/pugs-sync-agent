@@ -141,7 +141,11 @@ async function dispatchToLocalSender(item, { _fetch = fetch, _timeoutMs = DISPAT
       const errText = await res.text()
       throw new Error(`local send ${res.status}: ${errText.slice(0, 400)}`)
     }
-    return res.json()
+    try {
+      return await res.json()
+    } catch (e) {
+      throw new Error(`local send 200 malformed JSON: ${e.message}`)
+    }
   } finally {
     clearTimeout(timer)
   }
