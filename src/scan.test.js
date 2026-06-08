@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -383,4 +383,75 @@ test('postToWebhook: uses increasing backoff between retries', async () => {
     }),
   )
   assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms')
+})
+
+// ── sendHeartbeat ─────────────────────────────────────────────────────────────
+// Previously the heartbeat used a bare fetch() with no retry and swallowed
+// errors (exit 0). sendHeartbeat delegates to postToWebhook so the heartbeat
+// path gets the same 3-retry + throw-on-exhaustion behaviour as message sends.
+
+test('sendHeartbeat: succeeds on first attempt', async () => {
+  let calls = 0
+  await sendHeartbeat({
+    _fetch: async () => { calls++; return { ok: true, text: async () => '{}' } },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 1)
+})
+
+test('sendHeartbeat: sends empty messages array (correct heartbeat shape)', async () => {
+  let capturedBody
+  await sendHeartbeat({
+    _fetch: async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, text: async () => '{}' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.deepEqual(capturedBody, { messages: [] })
+})
+
+test('sendHeartbeat: retries on 503 and succeeds on second attempt', async () => {
+  let calls = 0
+  await sendHeartbeat({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 503, text: async () => 'err' }
+      return { ok: true, text: async () => '{}' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once and succeed')
+})
+
+test('sendHeartbeat: retries on network error and succeeds on second attempt', async () => {
+  let calls = 0
+  await sendHeartbeat({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { ok: true, text: async () => '{}' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry after network error')
+})
+
+test('sendHeartbeat: throws after all retries exhausted — so main() can exit non-zero', async () => {
+  // Validates the contract: sendHeartbeat throws (not silently exits 0) on
+  // persistent failure, letting the caller signal launchd via a non-zero exit.
+  let calls = 0
+  await assert.rejects(
+    () => sendHeartbeat({
+      _fetch: async () => { calls++; return { ok: false, status: 503, text: async () => 'err' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 503/,
+  )
+  assert.equal(calls, 3, 'should exhaust all 3 attempts')
 })
