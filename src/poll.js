@@ -176,20 +176,46 @@ async function pollOnce() {
   await processBatch(items, { reportOutcome, dispatchToLocalSender, maxAttempts: MAX_ATTEMPTS, log })
 }
 
-async function loop() {
+// Set by SIGTERM/SIGINT handlers so the loop finishes the current poll cycle
+// before exiting instead of being killed mid-dispatch (which would leave the
+// just-sent item as 'pending' on the cloud, triggering a duplicate iMessage
+// on the next poll cycle after the process restarts).
+let shuttingDown = false
+
+/**
+ * Main polling loop. Extracted with injectable deps so tests can drive it
+ * without live network calls or module-level state pollution.
+ *
+ * @param {{ _pollOnce?, _delay?, _isShuttingDown? }} deps
+ */
+async function loop({
+  _pollOnce = pollOnce,
+  _delay = (ms) => new Promise(r => setTimeout(r, ms)),
+  _isShuttingDown = () => shuttingDown,
+} = {}) {
   // First tick immediately, then on interval.
   for (;;) {
-    await pollOnce()
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    await _pollOnce()
+    if (_isShuttingDown()) return
+    await _delay(POLL_INTERVAL_MS)
+    if (_isShuttingDown()) return
   }
 }
 
 if (require.main === module) {
+  // On SIGTERM (launchctl unload / auto-updater reload) or SIGINT (Ctrl-C),
+  // drain the current poll cycle then exit cleanly rather than dying mid-dispatch.
+  process.once('SIGTERM', () => { log('SIGTERM — draining current poll cycle then exiting'); shuttingDown = true })
+  process.once('SIGINT',  () => { log('SIGINT — draining current poll cycle then exiting');  shuttingDown = true })
+
   log(`pugs-sync poller starting · base=${API_BASE} · interval=${POLL_INTERVAL_MS}ms`)
-  loop().catch(e => {
+  loop().then(() => {
+    log('graceful shutdown complete')
+    process.exit(0)
+  }).catch(e => {
     log('fatal loop error:', e)
     process.exit(1)
   })
 }
 
-module.exports = { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender }
+module.exports = { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop }

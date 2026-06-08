@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender } = require('./poll')
+const { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop } = require('./poll')
 
 const noop = () => {}
 const asyncNoop = async () => {}
@@ -318,4 +318,64 @@ test('reportOutcome: exhausts retries on repeated network throws without throwin
   }
   assert.equal(threw, false, 'exhausted network errors must not propagate')
   assert.equal(calls, 3)
+})
+
+// ---------------------------------------------------------------------------
+// loop() — graceful shutdown
+// ---------------------------------------------------------------------------
+
+test('loop: exits after current poll cycle completes when shutdown is set during pollOnce', async () => {
+  // Simulates SIGTERM arriving while a dispatch is in flight: the cycle
+  // finishes, then the loop drains cleanly rather than spinning forever.
+  let polls = 0
+  let shutDown = false
+
+  await loop({
+    _pollOnce: async () => { polls++; shutDown = true },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+  })
+
+  assert.equal(polls, 1, 'should run exactly one poll cycle before exiting')
+})
+
+test('loop: exits during sleep interval when shutdown is set between cycles', async () => {
+  let polls = 0
+  let sleeps = 0
+  let shutDown = false
+
+  await loop({
+    _pollOnce: async () => { polls++ },
+    _delay: async () => { sleeps++; shutDown = true },
+    _isShuttingDown: () => shutDown,
+  })
+
+  assert.equal(polls, 1, 'one cycle runs before the sleep')
+  assert.equal(sleeps, 1, 'sleep fires once then loop exits')
+})
+
+test('loop: runs multiple cycles before shutdown signal', async () => {
+  let polls = 0
+  let shutDown = false
+
+  await loop({
+    _pollOnce: async () => { polls++; if (polls >= 3) shutDown = true },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+  })
+
+  assert.equal(polls, 3, 'should run all cycles until shutdown flag is set')
+})
+
+test('loop: never calls _delay after shutdown is set (exits immediately after pollOnce)', async () => {
+  let shutDown = false
+  let delayCount = 0
+
+  await loop({
+    _pollOnce: async () => { shutDown = true },
+    _delay: async () => { delayCount++ },
+    _isShuttingDown: () => shutDown,
+  })
+
+  assert.equal(delayCount, 0, '_delay must not be called when shutdown flag is set after pollOnce')
 })
