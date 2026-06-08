@@ -40,6 +40,7 @@ const CHAT_DB     = process.env.CHAT_DB_PATH || path.join(os.homedir(), 'Library
 const STATE_PATH  = path.join(__dirname, '..', 'state.json')
 const BATCH_SIZE  = 200
 const MAX_PROSPECT_FETCH_TRIES = 3
+const MAX_WEBHOOK_POST_TRIES = 3
 const INITIAL_BACKFILL_DAYS = parseInt(process.env.INITIAL_BACKFILL_DAYS || '90', 10)
 const CONTACTS_SYNC_INTERVAL_MS = 60 * 60 * 1000  // once per hour (was 24h —
 // dropped while we get visibility into whether the sync is firing at all)
@@ -67,6 +68,52 @@ function snapshotDb() {
 
 // ───────────────────────────────────────────────────────────────────────
 // Main
+
+/**
+ * POST a message batch to the inbound webhook. Retries up to
+ * MAX_WEBHOOK_POST_TRIES times on 5xx and network errors; throws immediately
+ * on 4xx (permanent errors: bad secret, bad request — no point retrying).
+ * Returns the Response object on success so the caller can read the body.
+ *
+ * Without this, a transient Vercel cold-start or brief network blip would
+ * fail the most critical path in the scan — matching the retry behaviour
+ * already in fetchProspectHandles and poll.js's fetchPendingBatch.
+ */
+async function postToWebhook(payload, {
+  _fetch     = fetch,
+  _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  webhookUrl = WEBHOOK_URL,
+  secret     = SECRET,
+  scannerId  = SCANNER_ID,
+} = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= MAX_WEBHOOK_POST_TRIES; attempt++) {
+    let res
+    try {
+      res = await _fetch(webhookUrl, {
+        method:  'POST',
+        headers: {
+          'Content-Type':       'application/json',
+          'x-pugs-sync-secret': secret,
+          'x-pugs-scanner-id':  scannerId,
+        },
+        body: JSON.stringify(payload),
+      })
+    } catch (e) {
+      // Network error — retry
+      lastError = e
+      if (attempt < MAX_WEBHOOK_POST_TRIES) await _delay(500 * attempt)
+      continue
+    }
+    if (res.ok) return res
+    const errText = (await res.text()).slice(0, 500)
+    const err = new Error(`webhook ${res.status}: ${errText}`)
+    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    lastError = err
+    if (attempt < MAX_WEBHOOK_POST_TRIES) await _delay(500 * attempt)
+  }
+  throw lastError
+}
 
 /**
  * Validates and parses the raw JSON body from the prospect-handles endpoint.
@@ -260,22 +307,14 @@ async function main() {
 
     console.log(`Posting ${filteredPayload.length} messages (ROWIDs ${rows[0].rowid}..${rows[rows.length - 1].rowid})`)
 
-    const resp = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-pugs-sync-secret': SECRET,
-        'x-pugs-scanner-id': SCANNER_ID,
-      },
-      body: JSON.stringify({ messages: filteredPayload }),
-    })
-    const text = await resp.text()
-    if (!resp.ok) {
-      console.error(`Webhook failed ${resp.status}: ${text.slice(0, 500)}`)
-      db.close()
-      cleanupSnapshot(snapshotPath)
+    let webhookResp
+    try {
+      webhookResp = await postToWebhook({ messages: filteredPayload })
+    } catch (e) {
+      console.error(`Webhook failed: ${e.message}`)
       process.exit(4)
     }
+    const text = await webhookResp.text()
     console.log(`Webhook OK: ${text.slice(0, 200)}`)
 
     // Parse new_drafts_created from response so we can immediately enrich
@@ -332,4 +371,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook }
