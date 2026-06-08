@@ -24,6 +24,7 @@
 const path = require('path')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const { planItem } = require('./dispatch')
+const { fetchWithTimeout } = require('./fetch-timeout')
 
 const WEBHOOK_URL      = process.env.PUGS_SYNC_WEBHOOK_URL
 const SECRET           = process.env.PUGS_SYNC_SECRET
@@ -59,16 +60,17 @@ function log(...args) {
 const MAX_QUEUE_FETCH_TRIES = 3
 
 async function fetchPendingBatch({
-  _fetch = fetch,
-  _delay = (ms) => new Promise(r => setTimeout(r, ms)),
+  _fetch    = fetch,
+  _delay    = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
 } = {}) {
   let lastError
   for (let attempt = 1; attempt <= MAX_QUEUE_FETCH_TRIES; attempt++) {
     let res
     try {
-      res = await _fetch(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
+      res = await fetchWithTimeout(`${API_BASE}/api/sync/outbound-queue?limit=10`, {
         headers: { 'x-pugs-sync-secret': SECRET, 'x-pugs-scanner-id': SCANNER_ID },
-      })
+      }, _timeoutMs, _fetch)
     } catch (e) {
       lastError = e
       if (attempt < MAX_QUEUE_FETCH_TRIES) await _delay(500 * attempt)
@@ -98,12 +100,13 @@ async function fetchPendingBatch({
 const MAX_REPORT_TRIES = 3
 
 async function reportOutcome(id, payload, {
-  _fetch = fetch,
-  _delay = (ms) => new Promise(r => setTimeout(r, ms)),
+  _fetch     = fetch,
+  _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
 } = {}) {
   for (let attempt = 1; attempt <= MAX_REPORT_TRIES; attempt++) {
     try {
-      const res = await _fetch(`${API_BASE}/api/sync/outbound-queue/${id}`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/sync/outbound-queue/${id}`, {
         method:  'POST',
         headers: {
           'Content-Type':       'application/json',
@@ -111,7 +114,7 @@ async function reportOutcome(id, payload, {
           'x-pugs-scanner-id':  SCANNER_ID,
         },
         body: JSON.stringify(payload),
-      })
+      }, _timeoutMs, _fetch)
       if (res.ok) return
       const errText = (await res.text()).slice(0, 200)
       if (attempt < MAX_REPORT_TRIES) { await _delay(500 * attempt); continue }

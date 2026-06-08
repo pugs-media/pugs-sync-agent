@@ -452,3 +452,40 @@ test('loop: never calls _delay after shutdown is set (exits immediately after po
 
   assert.equal(delayCount, 0, '_delay must not be called when shutdown flag is set after pollOnce')
 })
+
+// ── fetch timeout: fetchPendingBatch / reportOutcome ──────────────────────────
+// Each attempt creates a fresh AbortController so a slow cloud is bounded to
+// _timeoutMs rather than hanging the poller loop indefinitely.
+
+function hangingFetch(url, opts) {
+  return new Promise((_, reject) => {
+    opts.signal.addEventListener('abort', () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      reject(err)
+    })
+  })
+}
+
+const NOOP_DELAY = async () => {}
+
+test('fetchPendingBatch: aborts after _timeoutMs when cloud hangs', async () => {
+  await assert.rejects(
+    () => fetchPendingBatch({ _fetch: hangingFetch, _delay: NOOP_DELAY, _timeoutMs: 20 }),
+    { name: 'AbortError' },
+  )
+})
+
+test('reportOutcome: aborts after _timeoutMs when cloud hangs', async () => {
+  // reportOutcome swallows errors after MAX_REPORT_TRIES — verify it still times
+  // out (doesn't hang forever) even though it doesn't propagate the throw.
+  let start = Date.now()
+  await reportOutcome('item-1', { status: 'sent' }, {
+    _fetch:     hangingFetch,
+    _delay:     NOOP_DELAY,
+    _timeoutMs: 20,
+  })
+  // 3 retries × 20ms each = at most ~100ms; well under 5s so if this hangs
+  // the test runner will time out and fail.
+  assert.ok(Date.now() - start < 5000, 'reportOutcome should not hang when cloud is slow')
+})

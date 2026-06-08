@@ -533,3 +533,56 @@ test('serializeProspects: restored prospects reject non-prospect handles (real f
   assert.ok(!restored.phones.has('9995550000'), 'unknown phone must not be in restored set')
   assert.ok(!restored.emails.has('stranger@example.com'), 'unknown email must not be in restored set')
 })
+
+// ── fetch timeout: fetchProspectHandles / postToWebhook ───────────────────────
+// Each attempt gets its own AbortController, so a slow cloud causes the fetch
+// to be aborted at _timeoutMs rather than hanging the scanner indefinitely.
+
+// Mock fetch that blocks until its AbortSignal fires.
+function hangingFetch(url, opts) {
+  return new Promise((_, reject) => {
+    opts.signal.addEventListener('abort', () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      reject(err)
+    })
+  })
+}
+
+test('fetchProspectHandles: aborts after _timeoutMs when cloud hangs', async () => {
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch:     hangingFetch,
+      _delay:     NOOP_DELAY,
+      _timeoutMs: 20,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+    }),
+    { name: 'AbortError' },
+  )
+})
+
+test('postToWebhook: aborts after _timeoutMs when cloud hangs', async () => {
+  await assert.rejects(
+    () => postToWebhook({ messages: [] }, {
+      _fetch:     hangingFetch,
+      _delay:     NOOP_DELAY,
+      _timeoutMs: 20,
+      ...WEBHOOK_OPTS,
+    }),
+    { name: 'AbortError' },
+  )
+})
+
+test('sendHeartbeat: aborts after _timeoutMs when cloud hangs', async () => {
+  await assert.rejects(
+    () => sendHeartbeat({
+      _fetch:     hangingFetch,
+      _delay:     NOOP_DELAY,
+      _timeoutMs: 20,
+      ...WEBHOOK_OPTS,
+    }),
+    { name: 'AbortError' },
+  )
+})

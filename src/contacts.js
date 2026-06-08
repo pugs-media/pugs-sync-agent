@@ -25,6 +25,7 @@ const os   = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
+const { fetchWithTimeout } = require('./fetch-timeout')
 
 const MAX_CONTACTS_POST_TRIES = 3
 
@@ -157,16 +158,17 @@ function dedupeContacts({ phones = [], emails = [] } = {}) {
  * Injectable _fetch / _delay allow deterministic unit testing.
  */
 async function postContactsPayload(url, body, {
-  _fetch    = fetch,
-  _delay    = (ms) => new Promise(r => setTimeout(r, ms)),
+  _fetch     = fetch,
+  _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
   secret,
-  scannerId = '',
+  scannerId  = '',
 } = {}) {
   let lastError
   for (let attempt = 1; attempt <= MAX_CONTACTS_POST_TRIES; attempt++) {
     let res
     try {
-      res = await _fetch(url, {
+      res = await fetchWithTimeout(url, {
         method:  'POST',
         headers: {
           'Content-Type':       'application/json',
@@ -174,7 +176,7 @@ async function postContactsPayload(url, body, {
           'x-pugs-scanner-id':  scannerId,
         },
         body: JSON.stringify(body),
-      })
+      }, _timeoutMs, _fetch)
     } catch (e) {
       lastError = e
       if (attempt < MAX_CONTACTS_POST_TRIES) await _delay(500 * attempt)
@@ -200,14 +202,14 @@ async function postContactsPayload(url, body, {
  * @param {function} [opts._fetch]  - injectable fetch (tests)
  * @param {function} [opts._delay]  - injectable delay (tests)
  */
-async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)), _findAddressBooks = findAddressBooks }) {
+async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)), _timeoutMs = 10_000, _findAddressBooks = findAddressBooks }) {
   const books = _findAddressBooks()
   if (!books.length) {
     // Still POST an empty payload so the server-side heartbeat records
     // "agent is alive, found no AddressBook sources at the expected path"
     // — otherwise we have zero visibility on whether the agent ran at all.
     try {
-      const resp = await _fetch(`${webhookBase}/api/sync/contacts`, {
+      const resp = await fetchWithTimeout(`${webhookBase}/api/sync/contacts`, {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -215,7 +217,7 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
           'x-pugs-scanner-id': scannerId,
         },
         body: JSON.stringify({ phones: [], emails: [], agent_note: 'no_address_books_found' }),
-      })
+      }, _timeoutMs, _fetch)
       const text = await resp.text()
       return { ok: resp.ok, skipped: 'no_address_books_found', server_status: resp.status, server: text.slice(0, 200) }
     } catch (e) {
@@ -241,7 +243,7 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
     const resp = await postContactsPayload(
       `${webhookBase}/api/sync/contacts`,
       payload,
-      { _fetch, _delay, secret, scannerId },
+      { _fetch, _delay, _timeoutMs, secret, scannerId },
     )
     const text = await resp.text()
     return {
