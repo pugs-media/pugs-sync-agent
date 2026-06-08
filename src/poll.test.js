@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { processBatch, reportOutcome, fetchPendingBatch } = require('./poll')
+const { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender } = require('./poll')
 
 const noop = () => {}
 const asyncNoop = async () => {}
@@ -225,6 +225,84 @@ test('fetchPendingBatch: propagates network errors unchanged', async () => {
     () => fetchPendingBatch({ _fetch: async () => { throw new Error('ECONNREFUSED') } }),
     /ECONNREFUSED/,
   )
+})
+
+// ---------------------------------------------------------------------------
+// dispatchToLocalSender — timeout and error handling
+// ---------------------------------------------------------------------------
+
+test('dispatchToLocalSender: returns JSON body on 200 OK', async () => {
+  const item = { id: '1', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+  const result = await dispatchToLocalSender(item, {
+    _fetch: async () => ({ ok: true, json: async () => ({ ok: true }), text: async () => '' }),
+  })
+  assert.deepEqual(result, { ok: true })
+})
+
+test('dispatchToLocalSender: throws with status text on non-ok response', async () => {
+  const item = { id: '2', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+  await assert.rejects(
+    () => dispatchToLocalSender(item, {
+      _fetch: async () => ({ ok: false, status: 500, text: async () => 'internal error' }),
+    }),
+    /local send 500.*internal error/,
+  )
+})
+
+test('dispatchToLocalSender: aborts and throws AbortError after _timeoutMs', async () => {
+  const item = { id: '3', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+
+  // Fetch that hangs until the AbortSignal fires
+  const hangingFetch = (_url, opts) =>
+    new Promise((_resolve, reject) => {
+      opts.signal.addEventListener('abort', () => {
+        const err = new Error('This operation was aborted')
+        err.name = 'AbortError'
+        reject(err)
+      })
+    })
+
+  await assert.rejects(
+    () => dispatchToLocalSender(item, { _fetch: hangingFetch, _timeoutMs: 50 }),
+    (err) => err.name === 'AbortError',
+  )
+})
+
+test('dispatchToLocalSender: timeout fires even if fetch resolves just before it', async () => {
+  // Verifies clearTimeout runs in the finally block; timer must not keep the
+  // test process open after a successful dispatch.
+  const item = { id: '4', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+  const result = await dispatchToLocalSender(item, {
+    _fetch: async () => ({ ok: true, json: async () => ({}), text: async () => '' }),
+    _timeoutMs: 5000,
+  })
+  assert.deepEqual(result, {})
+})
+
+test('processBatch: continues to next item when dispatchToLocalSender times out', async () => {
+  const outcomes = []
+  const items = [
+    { id: 'hung',  to_handle: '+14155550100', body: 'A', attempts: 0 },
+    { id: 'after', to_handle: '+14155550200', body: 'B', attempts: 0 },
+  ]
+
+  let dispatchCount = 0
+  const flakyDispatch = async (item) => {
+    dispatchCount++
+    if (item.id === 'hung') throw new Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+    return {}
+  }
+
+  await processBatch(items, deps({
+    reportOutcome: async (id, payload) => { outcomes.push({ id, status: payload.status }) },
+    dispatchToLocalSender: flakyDispatch,
+  }))
+
+  assert.equal(dispatchCount, 2, 'both items must be attempted')
+  assert.deepEqual(outcomes, [
+    { id: 'hung',  status: 'failed' },
+    { id: 'after', status: 'sent' },
+  ])
 })
 
 test('reportOutcome: exhausts retries on repeated network throws without throwing', async () => {
