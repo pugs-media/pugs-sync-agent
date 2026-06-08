@@ -20,6 +20,7 @@ const { filterMessages } = require('./filter')
 const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 const { normalizeRows } = require('./payload')
 const { loadState, saveState } = require('./state')
+const { fetchWithTimeout } = require('./fetch-timeout')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -97,16 +98,18 @@ function parseNewDraftsCount(text) {
 async function sendHeartbeat({
   _fetch     = fetch,
   _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
   webhookUrl = WEBHOOK_URL,
   secret     = SECRET,
   scannerId  = SCANNER_ID,
 } = {}) {
-  return postToWebhook({ messages: [] }, { _fetch, _delay, webhookUrl, secret, scannerId })
+  return postToWebhook({ messages: [] }, { _fetch, _delay, _timeoutMs, webhookUrl, secret, scannerId })
 }
 
 async function postToWebhook(payload, {
   _fetch     = fetch,
   _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
   webhookUrl = WEBHOOK_URL,
   secret     = SECRET,
   scannerId  = SCANNER_ID,
@@ -115,7 +118,7 @@ async function postToWebhook(payload, {
   for (let attempt = 1; attempt <= MAX_WEBHOOK_POST_TRIES; attempt++) {
     let res
     try {
-      res = await _fetch(webhookUrl, {
+      res = await fetchWithTimeout(webhookUrl, {
         method:  'POST',
         headers: {
           'Content-Type':       'application/json',
@@ -123,7 +126,7 @@ async function postToWebhook(payload, {
           'x-pugs-scanner-id':  scannerId,
         },
         body: JSON.stringify(payload),
-      })
+      }, _timeoutMs, _fetch)
     } catch (e) {
       // Network error — retry
       lastError = e
@@ -182,6 +185,7 @@ function serializeProspects(prospects) {
 async function fetchProspectHandles({
   _fetch     = fetch,
   _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  _timeoutMs = 10_000,
   webhookUrl = WEBHOOK_URL,
   secret     = SECRET,
   scannerId  = SCANNER_ID,
@@ -191,9 +195,9 @@ async function fetchProspectHandles({
   let lastError
   for (let attempt = 1; attempt <= MAX_PROSPECT_FETCH_TRIES; attempt++) {
     try {
-      const res = await _fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: { 'x-pugs-sync-secret': secret, 'x-pugs-scanner-id': scannerId },
-      })
+      }, _timeoutMs, _fetch)
       if (res.ok) {
         const j = await res.json()
         return parseProspectHandles(j)

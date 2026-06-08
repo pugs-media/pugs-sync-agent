@@ -410,3 +410,46 @@ test('syncContacts no-address-books: uses _fetch not bare global fetch', async (
   })
   assert.ok(fetchCalled, '_fetch injection must be called (not bare global fetch)')
 })
+
+// ── fetch timeout: postContactsPayload / syncContacts ─────────────────────────
+// A slow or hung cloud must not stall the contacts-sync path indefinitely.
+
+function hangingFetch(url, opts) {
+  return new Promise((_, reject) => {
+    opts.signal.addEventListener('abort', () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      reject(err)
+    })
+  })
+}
+
+test('postContactsPayload: aborts after _timeoutMs when cloud hangs', async () => {
+  await assert.rejects(
+    () => postContactsPayload(
+      'https://example.pugs.media/api/sync/contacts',
+      { phones: [], emails: [] },
+      { _fetch: hangingFetch, _delay: NOOP_DELAY, _timeoutMs: 20, secret: 'test-secret' },
+    ),
+    { name: 'AbortError' },
+  )
+})
+
+test('syncContacts no-books: aborts the bare no-books POST after _timeoutMs', async () => {
+  // The no-books path has its own fetch call (not via postContactsPayload).
+  // Verify it also times out rather than hanging.
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _fetch: hangingFetch,
+    _delay: NOOP_DELAY,
+    _timeoutMs: 20,
+    ...NO_BOOKS,
+  })
+  // syncContacts catches errors in the no-books path and returns ok:false — not a throw.
+  assert.equal(result.ok, false)
+  assert.equal(result.skipped, 'no_address_books_found_and_post_failed')
+  assert.ok(result.error, 'error message should be set')
+})
+
