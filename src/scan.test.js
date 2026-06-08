@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -454,4 +454,31 @@ test('sendHeartbeat: throws after all retries exhausted — so main() can exit n
     /webhook 503/,
   )
   assert.equal(calls, 3, 'should exhaust all 3 attempts')
+})
+
+// ── parseNewDraftsCount ───────────────────────────────────────────────────────
+
+test('parseNewDraftsCount: returns new_drafts_created from valid JSON', () => {
+  assert.equal(parseNewDraftsCount('{"ok":true,"new_drafts_created":3}'), 3)
+})
+
+test('parseNewDraftsCount: returns 0 when new_drafts_created is absent', () => {
+  assert.equal(parseNewDraftsCount('{"ok":true,"imported_messages":47}'), 0)
+})
+
+test('parseNewDraftsCount: returns 0 when new_drafts_created is 0', () => {
+  assert.equal(parseNewDraftsCount('{"ok":true,"new_drafts_created":0}'), 0)
+})
+
+test('parseNewDraftsCount: returns 0 (not throws) on non-JSON body — e.g. HTML error page', () => {
+  // Cloud occasionally returns an HTML cold-start error page; must not throw.
+  assert.equal(parseNewDraftsCount('<html>Service Unavailable</html>'), 0)
+})
+
+test('parseNewDraftsCount: returns 0 on empty string', () => {
+  assert.equal(parseNewDraftsCount(''), 0)
+})
+
+test('parseNewDraftsCount: returns 0 when JSON is an array (not an object)', () => {
+  assert.equal(parseNewDraftsCount('[1,2,3]'), 0)
 })
