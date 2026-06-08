@@ -98,6 +98,9 @@ function extractFromDb(dbPath) {
       if (!name) continue
       out.emails.push({ name, email: row.email })
     }
+  } catch (e) {
+    console.error(`extractFromDb(${dbPath}): ${e.message} — returning empty, contacts from this source skipped`)
+    return out
   } finally {
     if (db) db.close()
   }

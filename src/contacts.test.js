@@ -118,6 +118,42 @@ test('snapshot: a contact still in the un-checkpointed WAL is seen via the snaps
   }
 })
 
+test('extractFromDb: returns empty instead of throwing on a corrupt (non-SQLite) file', () => {
+  const badFile = path.join(dir, 'bad.abcddb')
+  fs.writeFileSync(badFile, 'not a sqlite database')
+  const result = extractFromDb(badFile)
+  assert.deepEqual(result, { phones: [], emails: [] })
+})
+
+test('syncContacts: still sends contacts from readable books when one book is corrupt', async () => {
+  const goodFile = path.join(dir, 'AddressBook-v22.abcddb')
+  const goodDb = makeAddressBook(goodFile)
+  addContact(goodDb, 1, { first: 'Lead', last: 'Acme', phone: '+1 (415) 555-0100', email: 'lead@acme.com' })
+  goodDb.close()
+
+  const badFile = path.join(dir, 'bad.abcddb')
+  fs.writeFileSync(badFile, 'not a sqlite database')
+
+  let capturedBody
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _findAddressBooks: () => [badFile, goodFile],
+    _fetch: async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, text: async () => '{"ok":true}' }
+    },
+    _delay: async () => {},
+  })
+
+  assert.ok(result.ok, 'sync must succeed despite one corrupt book')
+  assert.equal(result.sent.phones, 1, 'contact from the good book must be sent')
+  assert.equal(result.sent.emails, 1, 'email from the good book must be sent')
+  assert.equal(capturedBody.phones.length, 1)
+  assert.equal(capturedBody.emails.length, 1)
+})
+
 // ── dedupeContacts (pure) ────────────────────────────────────────────────────
 
 test('dedupeContacts: keys phones by last 10 digits and emails by lowercased form', () => {
