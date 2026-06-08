@@ -66,6 +66,21 @@ function snapshotDb() {
   return dest
 }
 
+/**
+ * Parse the new_drafts_created count from the webhook response body.
+ * Returns 0 and logs a warning if the body is not valid JSON or lacks the
+ * field — callers fall back to the hourly contacts-sync cadence rather than
+ * silently skipping enrichment with no log trail.
+ */
+function parseNewDraftsCount(text) {
+  try {
+    return (JSON.parse(text) || {}).new_drafts_created || 0
+  } catch (e) {
+    console.warn(`parseNewDraftsCount: could not parse webhook response (${e.message}) — falling back to hourly contacts-sync cadence`)
+    return 0
+  }
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Main
 
@@ -321,7 +336,7 @@ async function main() {
     // Parse new_drafts_created from response so we can immediately enrich
     // names below. If parsing fails, fall back to hourly cadence — the
     // server-side response shape might evolve.
-    try { newDraftsThisRun = (JSON.parse(text) || {}).new_drafts_created || 0 } catch {}
+    newDraftsThisRun = parseNewDraftsCount(text)
 
     // Only advance state if the POST succeeded
     const lastRowid = rows[rows.length - 1].rowid
@@ -372,4 +387,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount }
