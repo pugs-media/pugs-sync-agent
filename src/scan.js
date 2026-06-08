@@ -125,11 +125,11 @@ function parseProspectHandles(j) {
   if (!j || typeof j !== 'object' || Array.isArray(j)) {
     throw new Error('prospect-handles response is not an object')
   }
-  if (j.phones != null && !Array.isArray(j.phones)) {
-    throw new TypeError(`prospect-handles: phones must be an array, got ${typeof j.phones}`)
+  if (j.phones !== undefined && !Array.isArray(j.phones)) {
+    throw new TypeError(`prospect-handles: phones must be an array, got ${j.phones === null ? 'null' : typeof j.phones}`)
   }
-  if (j.emails != null && !Array.isArray(j.emails)) {
-    throw new TypeError(`prospect-handles: emails must be an array, got ${typeof j.emails}`)
+  if (j.emails !== undefined && !Array.isArray(j.emails)) {
+    throw new TypeError(`prospect-handles: emails must be an array, got ${j.emails === null ? 'null' : typeof j.emails}`)
   }
   return {
     phones: new Set(j.phones ?? []),
