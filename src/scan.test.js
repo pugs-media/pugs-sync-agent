@@ -166,14 +166,20 @@ test('parseProspectHandles: treats absent phones/emails as empty sets', () => {
   assert.equal(result.total, 0)
 })
 
-test('parseProspectHandles: treats null phones as empty set', () => {
-  const result = parseProspectHandles({ phones: null, emails: [], count_phones: 0, count_emails: 0 })
-  assert.equal(result.phones.size, 0)
+test('parseProspectHandles: throws when phones is null (not silently empty-allowlist)', () => {
+  // null is not a valid value — explicit null from the cloud would silently zero
+  // the allowlist and drop all prospect messages. Must throw, not produce empty set.
+  assert.throws(
+    () => parseProspectHandles({ phones: null, emails: [], count_phones: 0, count_emails: 0 }),
+    /phones must be an array/,
+  )
 })
 
-test('parseProspectHandles: treats null emails as empty set', () => {
-  const result = parseProspectHandles({ phones: [], emails: null, count_phones: 0, count_emails: 0 })
-  assert.equal(result.emails.size, 0)
+test('parseProspectHandles: throws when emails is null (not silently empty-allowlist)', () => {
+  assert.throws(
+    () => parseProspectHandles({ phones: [], emails: null, count_phones: 0, count_emails: 0 }),
+    /emails must be an array/,
+  )
 })
 
 test('parseProspectHandles: throws when phones is an object (not array)', () => {
