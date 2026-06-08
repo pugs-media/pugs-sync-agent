@@ -203,7 +203,16 @@ async function postContactsPayload(url, body, {
  * @param {function} [opts._delay]  - injectable delay (tests)
  */
 async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)), _timeoutMs = 10_000, _findAddressBooks = findAddressBooks }) {
-  const books = _findAddressBooks()
+  let books
+  try {
+    books = _findAddressBooks()
+  } catch (e) {
+    // EACCES (directory exists but not readable) or similar FS errors must not
+    // crash the scan process — contacts sync is enrichment-only. Log and degrade
+    // to the no-books path so the server still receives a heartbeat.
+    console.error(`syncContacts: findAddressBooks threw — ${e.message}; treating as no address books`)
+    books = []
+  }
   if (!books.length) {
     // Still POST an empty payload so the server-side heartbeat records
     // "agent is alive, found no AddressBook sources at the expected path"
