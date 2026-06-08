@@ -60,7 +60,7 @@ function createApp({
     const svc = service === 'SMS' ? 'SMS' : 'iMessage'
     const script = buildSendScript({ to, text, service: svc })
 
-    execFile('osascript', ['-e', script], { timeout: 15000 }, (err, stdout, stderr) => {
+    execFile('osascript', ['-e', script], { timeout: 15000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
       if (err) {
         console.error('osascript process error:', stderr || err.message)
         return res.status(500).json({ error: 'send failed', detail: (stderr || err.message).slice(0, 400) })

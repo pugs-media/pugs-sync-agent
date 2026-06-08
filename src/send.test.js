@@ -212,3 +212,25 @@ test('POST /send: osascript parse failure returns 500 with AppleScript detail', 
     assert.match(res.body.detail, /-1728/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Process kill guarantee
+// ---------------------------------------------------------------------------
+
+test('POST /send: execFile is called with killSignal SIGKILL so a hung osascript cannot outlive its timeout', async () => {
+  // If killSignal defaults to SIGTERM and osascript is blocking on a UI
+  // interaction, the timeout fires, the callback gets an error, but the
+  // process keeps running. It may eventually send the message after the
+  // poller already marked the item failed and re-queued it — duplicate iMessage.
+  // SIGKILL guarantees the process is dead before we return the error.
+  let capturedOpts
+  const captureExecFile = (_cmd, _args, opts, cb) => {
+    capturedOpts = opts
+    cb(null, 'ok', '')
+  }
+  await withServer(defaultDeps({ execFile: captureExecFile }), async server => {
+    await httpRequest(server, { body: { to: '+14155550100', text: 'hello' } })
+    assert.equal(capturedOpts.killSignal, 'SIGKILL',
+      'osascript must be hard-killed on timeout to prevent orphaned processes sending duplicate iMessages')
+  })
+})
