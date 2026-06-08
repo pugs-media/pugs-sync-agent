@@ -7,7 +7,7 @@ const os = require('os')
 const path = require('path')
 const Database = require('better-sqlite3')
 
-const { snapshot, extractFromDb, buildName, dedupeContacts, postContactsPayload } = require('./contacts')
+const { snapshot, extractFromDb, buildName, dedupeContacts, postContactsPayload, syncContacts } = require('./contacts')
 
 // Each test gets its own scratch dir so parallel runs don't collide.
 let dir
@@ -304,4 +304,42 @@ test('postContactsPayload: uses increasing backoff between retries', async () =>
     }),
   )
   assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms (500 * attempt)')
+})
+
+// ── syncContacts: no-address-books branch ─────────────────────────────────────
+
+const SYNC_BASE = { webhookBase: 'https://example.pugs.media', secret: 'test-secret', scannerId: 'test-id' }
+
+test('syncContacts: POSTs empty heartbeat with agent_note when no AddressBooks found', async () => {
+  let captured
+  const result = await syncContacts({
+    ...SYNC_BASE,
+    _findAddressBooks: () => [],
+    _fetch: async (url, opts) => {
+      captured = { url, opts }
+      return { ok: true, status: 200, text: async () => '{"ok":true}' }
+    },
+    _delay: NOOP_DELAY,
+  })
+  assert.equal(captured.url, 'https://example.pugs.media/api/sync/contacts')
+  const body = JSON.parse(captured.opts.body)
+  assert.deepEqual(body.phones, [])
+  assert.deepEqual(body.emails, [])
+  assert.equal(body.agent_note, 'no_address_books_found')
+  assert.equal(captured.opts.headers['x-pugs-sync-secret'], 'test-secret')
+  assert.equal(captured.opts.headers['x-pugs-scanner-id'], 'test-id')
+  assert.equal(result.skipped, 'no_address_books_found')
+  assert.equal(result.ok, true)
+})
+
+test('syncContacts: returns error object when no AddressBooks found and POST fails', async () => {
+  const result = await syncContacts({
+    ...SYNC_BASE,
+    _findAddressBooks: () => [],
+    _fetch: async () => { throw new Error('ECONNRESET') },
+    _delay: NOOP_DELAY,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.skipped, 'no_address_books_found_and_post_failed')
+  assert.match(result.error, /ECONNRESET/)
 })

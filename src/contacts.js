@@ -197,14 +197,14 @@ async function postContactsPayload(url, body, {
  * @param {function} [opts._fetch]  - injectable fetch (tests)
  * @param {function} [opts._delay]  - injectable delay (tests)
  */
-async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)) }) {
-  const books = findAddressBooks()
+async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetch, _delay = (ms) => new Promise(r => setTimeout(r, ms)), _findAddressBooks = findAddressBooks }) {
+  const books = _findAddressBooks()
   if (!books.length) {
     // Still POST an empty payload so the server-side heartbeat records
     // "agent is alive, found no AddressBook sources at the expected path"
     // — otherwise we have zero visibility on whether the agent ran at all.
     try {
-      const resp = await fetch(`${webhookBase}/api/sync/contacts`, {
+      const resp = await _fetch(`${webhookBase}/api/sync/contacts`, {
         method:  'POST',
         headers: {
           'Content-Type': 'application/json',
