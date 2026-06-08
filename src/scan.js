@@ -163,6 +163,18 @@ function parseProspectHandles(j) {
   }
 }
 
+/**
+ * Convert a live prospects object ({ phones: Set, emails: Set }) to a plain
+ * JSON-serializable form for caching in state.json. Use parseProspectHandles
+ * to reconstruct the live form from the serialized value.
+ */
+function serializeProspects(prospects) {
+  return {
+    phones: [...prospects.phones],
+    emails: [...prospects.emails],
+  }
+}
+
 // Fetch the prospect-handle allowlist from pugs-sales. Returns
 // { phones: Set, emails: Set, total }. Retries up to MAX_PROSPECT_FETCH_TRIES
 // times with exponential backoff before throwing. Throws on persistent failure
@@ -212,9 +224,31 @@ async function main() {
   try {
     prospects = await fetchProspectHandles({ webhookUrl: WEBHOOK_URL, secret: SECRET, scannerId: SCANNER_ID })
     console.log(`Prospect allowlist: ${prospects.phones.size} phones + ${prospects.emails.size} emails (${prospects.total} total)`)
+    // Persist a fresh copy immediately so the next run can fall back to it if
+    // the cloud is temporarily unreachable. We load-then-merge to avoid
+    // clobbering last_rowid or last_contacts_at that may already be on disk.
+    const stateForCache = loadState(STATE_PATH)
+    saveState(STATE_PATH, { ...stateForCache, cached_prospects: serializeProspects(prospects) })
   } catch (e) {
-    console.error(`Failed to fetch prospect allowlist — halting scan to avoid un-filtered ingest. ${e.message}`)
-    process.exit(5)
+    // Cloud is down or unreachable — try the most-recently cached allowlist.
+    // A stale cache is far safer than halting all inbound ingest: the allowlist
+    // only ever grows (prospects are added, never removed mid-conversation), so
+    // a few-hours-old list risks at most a temporary gap in new-prospect detection,
+    // not leaking non-prospect messages (the cache is only used when fetch fails).
+    const stateForCache = loadState(STATE_PATH)
+    const cache = stateForCache.cached_prospects
+    if (cache) {
+      try {
+        prospects = parseProspectHandles(cache)
+        console.warn(`Could not reach prospect-handles endpoint (${e.message}) — using cached allowlist (${prospects.phones.size} phones + ${prospects.emails.size} emails)`)
+      } catch (cacheErr) {
+        console.error(`Failed to fetch prospect allowlist and cached allowlist is invalid — halting scan. fetch: ${e.message}; cache: ${cacheErr.message}`)
+        process.exit(5)
+      }
+    } else {
+      console.error(`Failed to fetch prospect allowlist — halting scan (no cache available). ${e.message}`)
+      process.exit(5)
+    }
   }
 
   const state = loadState(STATE_PATH)
@@ -387,4 +421,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects }

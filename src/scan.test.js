@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -481,4 +481,55 @@ test('parseNewDraftsCount: returns 0 on empty string', () => {
 
 test('parseNewDraftsCount: returns 0 when JSON is an array (not an object)', () => {
   assert.equal(parseNewDraftsCount('[1,2,3]'), 0)
+})
+
+// ── serializeProspects ────────────────────────────────────────────────────────
+// serializeProspects converts the live Set-based prospects object to a plain
+// JSON-serializable form so it can be cached in state.json and later
+// reconstructed via parseProspectHandles.
+
+test('serializeProspects: converts phones and emails Sets to plain arrays', () => {
+  const prospects = {
+    phones: new Set(['4155550100', '6505551234']),
+    emails: new Set(['lead@example.com']),
+    total:  3,
+  }
+  const serialized = serializeProspects(prospects)
+  assert.ok(Array.isArray(serialized.phones), 'phones should be an array')
+  assert.ok(Array.isArray(serialized.emails), 'emails should be an array')
+  assert.deepEqual(serialized.phones.sort(), ['4155550100', '6505551234'])
+  assert.deepEqual(serialized.emails, ['lead@example.com'])
+})
+
+test('serializeProspects: empty Sets serialize to empty arrays', () => {
+  const prospects = { phones: new Set(), emails: new Set(), total: 0 }
+  const serialized = serializeProspects(prospects)
+  assert.deepEqual(serialized.phones, [])
+  assert.deepEqual(serialized.emails, [])
+})
+
+test('serializeProspects: round-trips through parseProspectHandles', () => {
+  const original = {
+    phones: new Set(['4155550100', '6505551234']),
+    emails: new Set(['lead@example.com']),
+    total:  3,
+  }
+  const serialized = serializeProspects(original)
+  // parseProspectHandles accepts plain array form — this is the cache-restore path
+  const restored = parseProspectHandles(serialized)
+  assert.ok(restored.phones.has('4155550100'))
+  assert.ok(restored.phones.has('6505551234'))
+  assert.ok(restored.emails.has('lead@example.com'))
+})
+
+test('serializeProspects: restored prospects reject non-prospect handles (real filter integrity)', () => {
+  const original = {
+    phones: new Set(['4155550100']),
+    emails: new Set(['lead@example.com']),
+    total:  2,
+  }
+  const restored = parseProspectHandles(serializeProspects(original))
+  // A handle NOT in the original allowlist must not appear after round-trip
+  assert.ok(!restored.phones.has('9995550000'), 'unknown phone must not be in restored set')
+  assert.ok(!restored.emails.has('stranger@example.com'), 'unknown email must not be in restored set')
 })
