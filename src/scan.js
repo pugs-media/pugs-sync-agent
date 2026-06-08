@@ -79,6 +79,16 @@ function snapshotDb() {
  * fail the most critical path in the scan — matching the retry behaviour
  * already in fetchProspectHandles and poll.js's fetchPendingBatch.
  */
+async function sendHeartbeat({
+  _fetch     = fetch,
+  _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
+  webhookUrl = WEBHOOK_URL,
+  secret     = SECRET,
+  scannerId  = SCANNER_ID,
+} = {}) {
+  return postToWebhook({ messages: [] }, { _fetch, _delay, webhookUrl, secret, scannerId })
+}
+
 async function postToWebhook(payload, {
   _fetch     = fetch,
   _delay     = (ms) => new Promise(r => setTimeout(r, ms)),
@@ -266,20 +276,11 @@ async function main() {
       // a silent scanner is indistinguishable from a crashed scanner.
       console.log('No new messages — sending heartbeat')
       try {
-        await fetch(WEBHOOK_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-pugs-sync-secret': SECRET,
-            'x-pugs-scanner-id': SCANNER_ID,
-          },
-          body: JSON.stringify({ messages: [] }),
-        })
+        await sendHeartbeat()
       } catch (e) {
-        console.error(`Heartbeat failed: ${e.message}`)
+        console.error(`Heartbeat failed after retries: ${e.message}`)
+        process.exit(4)
       }
-      db.close()
-      cleanupSnapshot(snapshotPath)
       return
     }
 
@@ -371,4 +372,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat }
