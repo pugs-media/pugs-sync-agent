@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop } = require('./poll')
+const { processBatch, flushJournal, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop } = require('./poll')
 
 const noop = () => {}
 const asyncNoop = async () => {}
@@ -538,4 +538,97 @@ test('reportOutcome: aborts after _timeoutMs when cloud hangs', async () => {
   // 3 retries × 20ms each = at most ~100ms; well under 5s so if this hangs
   // the test runner will time out and fail.
   assert.ok(Date.now() - start < 5000, 'reportOutcome should not hang when cloud is slow')
+})
+
+// ---------------------------------------------------------------------------
+// dispatch journal integration — processBatch
+// ---------------------------------------------------------------------------
+
+test('processBatch: marks journal after successful dispatch, before reportOutcome', async () => {
+  const order = []
+  const item = { id: 'j1', to_handle: '+14155550100', body: 'Hello', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: async () => { order.push('dispatch') },
+    reportOutcome:         async () => { order.push('report') },
+    journalMark:           (id)    => { order.push(`mark:${id}`) },
+    journalClear:          (id)    => { order.push(`clear:${id}`) },
+  }))
+
+  assert.deepEqual(order, ['dispatch', 'mark:j1', 'report', 'clear:j1'],
+    'journal mark must come after dispatch and before reportOutcome')
+})
+
+test('processBatch: does not mark journal when dispatch fails', async () => {
+  const marked = []
+  const item = { id: 'j2', to_handle: '+14155550100', body: 'Hello', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: async () => { throw new Error('osascript error') },
+    journalMark:           (id)    => { marked.push(id) },
+    journalClear:          (id)    => { marked.push(id) },
+  }))
+
+  assert.equal(marked.length, 0, 'journal must not be touched when dispatch fails')
+})
+
+test('processBatch: does not mark journal for skip/fail/drop paths', async () => {
+  const marked = []
+  const items = [
+    { id: 'sk', to_handle: '+14155550100', body: 'B', attempts: MAX },  // skip
+    { id: 'fl', to_handle: '',             body: 'C', attempts: 0 },    // fail
+    { /* drop */  to_handle: '+1415', body: 'D' },
+  ]
+
+  await processBatch(items, deps({
+    journalMark:  (id) => { marked.push(id) },
+    journalClear: (id) => { marked.push(id) },
+  }))
+
+  assert.equal(marked.length, 0, 'journal must only be touched on the send path')
+})
+
+// ---------------------------------------------------------------------------
+// dispatch journal integration — flushJournal
+// ---------------------------------------------------------------------------
+
+test('flushJournal: reports each pending id as sent then clears it', async () => {
+  const reported = []
+  const cleared  = []
+
+  await flushJournal({
+    reportOutcome: async (id, payload) => { reported.push({ id, status: payload.status }) },
+    journalList:   () => ['crash-1', 'crash-2'],
+    journalClear:  (id) => { cleared.push(id) },
+    log: noop,
+  })
+
+  assert.deepEqual(reported, [
+    { id: 'crash-1', status: 'sent' },
+    { id: 'crash-2', status: 'sent' },
+  ])
+  assert.deepEqual(cleared, ['crash-1', 'crash-2'])
+})
+
+test('flushJournal: is a no-op when journal is empty', async () => {
+  let called = false
+  await flushJournal({
+    reportOutcome: async () => { called = true },
+    journalList:   () => [],
+    journalClear:  () => {},
+    log: noop,
+  })
+  assert.equal(called, false, 'reportOutcome must not be called when journal is empty')
+})
+
+test('flushJournal: clears each id even when reportOutcome swallows an error', async () => {
+  const cleared = []
+  await flushJournal({
+    // reportOutcome is already log-and-swallow in production, so simulate that
+    reportOutcome: async () => { /* swallowed */ },
+    journalList:   () => ['item-x'],
+    journalClear:  (id) => { cleared.push(id) },
+    log: noop,
+  })
+  assert.deepEqual(cleared, ['item-x'], 'journal entry must be cleared even when report is a no-op')
 })

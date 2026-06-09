@@ -25,6 +25,7 @@ const path = require('path')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const { planItem } = require('./dispatch')
 const { fetchWithTimeout } = require('./fetch-timeout')
+const journal = require('./dispatch-journal')
 
 const WEBHOOK_URL      = process.env.PUGS_SYNC_WEBHOOK_URL
 const SECRET           = process.env.PUGS_SYNC_SECRET
@@ -160,9 +161,16 @@ async function dispatchToLocalSender(item, { _fetch = fetch, _timeoutMs = DISPAT
  * exercises every branch with injected deps instead of live network calls.
  *
  * @param {object[]} items
- * @param {{ reportOutcome, dispatchToLocalSender, maxAttempts, log }} deps
+ * @param {{ reportOutcome, dispatchToLocalSender, maxAttempts, log, journalMark?, journalClear? }} deps
  */
-async function processBatch(items, { reportOutcome, dispatchToLocalSender, maxAttempts, log }) {
+async function processBatch(items, {
+  reportOutcome,
+  dispatchToLocalSender,
+  maxAttempts,
+  log,
+  journalMark  = () => {},
+  journalClear = () => {},
+}) {
   for (const item of items) {
     const plan = planItem(item, { maxAttempts })
 
@@ -188,7 +196,12 @@ async function processBatch(items, { reportOutcome, dispatchToLocalSender, maxAt
 
     try {
       await dispatchToLocalSender(item)
+      // Mark the journal BEFORE reporting so a crash between dispatch and
+      // reportOutcome is recoverable: flushJournal on the next startup will
+      // re-report the outcome without re-sending the iMessage.
+      journalMark(item.id)
       await reportOutcome(item.id, { status: 'sent' })
+      journalClear(item.id)
       log(`sent ${item.id} → ${item.to_handle}`)
     } catch (e) {
       const msg = e?.message || String(e)
@@ -198,7 +211,32 @@ async function processBatch(items, { reportOutcome, dispatchToLocalSender, maxAt
   }
 }
 
+/**
+ * On startup, report outcomes for any items that were dispatched in a prior
+ * run that crashed before reportOutcome could complete. Called at the top of
+ * each pollOnce() so the first real batch runs against a clean journal.
+ *
+ * @param {{ reportOutcome, journalList, journalClear, log }} deps
+ */
+async function flushJournal({ reportOutcome, journalList, journalClear, log }) {
+  const pending = journalList()
+  if (pending.length === 0) return
+  log(`flushing ${pending.length} unconfirmed dispatch(es) from prior crash`)
+  for (const id of pending) {
+    await reportOutcome(id, { status: 'sent' })
+    journalClear(id)
+    log(`flushed dispatch journal for item ${id}`)
+  }
+}
+
 async function pollOnce() {
+  await flushJournal({
+    reportOutcome,
+    journalList:  () => journal.list(),
+    journalClear: (id) => journal.clear(id),
+    log,
+  })
+
   let items
   try {
     items = await fetchPendingBatch()
@@ -209,7 +247,14 @@ async function pollOnce() {
   if (items.length === 0) return
 
   log(`processing ${items.length} pending iMessage(s)`)
-  await processBatch(items, { reportOutcome, dispatchToLocalSender, maxAttempts: MAX_ATTEMPTS, log })
+  await processBatch(items, {
+    reportOutcome,
+    dispatchToLocalSender,
+    maxAttempts: MAX_ATTEMPTS,
+    log,
+    journalMark:  (id) => journal.mark(id),
+    journalClear: (id) => journal.clear(id),
+  })
 }
 
 // Set by SIGTERM/SIGINT handlers so the loop finishes the current poll cycle
@@ -254,4 +299,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { processBatch, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop }
+module.exports = { processBatch, flushJournal, reportOutcome, fetchPendingBatch, dispatchToLocalSender, loop }
