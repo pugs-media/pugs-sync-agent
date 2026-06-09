@@ -632,3 +632,62 @@ test('flushJournal: clears each id even when reportOutcome swallows an error', a
   })
   assert.deepEqual(cleared, ['item-x'], 'journal entry must be cleared even when report is a no-op')
 })
+
+// ---------------------------------------------------------------------------
+// dispatchToLocalSender — request body and header contract
+//
+// The poller renames cloud-schema fields before forwarding to the local sender:
+//   item.to_handle  →  body.to
+//   item.body       →  body.text
+// and hardcodes service: 'iMessage'. These mappings are the contract between
+// the cloud queue shape and the sender's /send API. If either drifts silently
+// (e.g. cloud renames to_handle → recipient and the poller isn't updated), the
+// sender returns 400 and outbound messages stop. Tests lock the field names so
+// a rename is caught immediately.
+// ---------------------------------------------------------------------------
+
+test('dispatchToLocalSender: request body maps to_handle→to and body→text', async () => {
+  let capturedBody
+  const item = { id: 'r1', to_handle: '+14155550100', body: 'Hello world', attempts: 0 }
+
+  await dispatchToLocalSender(item, {
+    _fetch: async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+
+  assert.equal(capturedBody.to, '+14155550100', 'to_handle must be forwarded as "to"')
+  assert.equal(capturedBody.text, 'Hello world', 'body must be forwarded as "text"')
+})
+
+test('dispatchToLocalSender: request body hardcodes service=iMessage (v1 design decision)', async () => {
+  let capturedBody
+  const item = { id: 'r2', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+
+  await dispatchToLocalSender(item, {
+    _fetch: async (_url, opts) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+
+  assert.equal(capturedBody.service, 'iMessage',
+    'service must always be "iMessage" — SMS fallback is explicitly out of scope for v1')
+})
+
+test('dispatchToLocalSender: request includes x-pugs-sync-secret auth header', async () => {
+  let capturedHeaders
+  const item = { id: 'r3', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+
+  await dispatchToLocalSender(item, {
+    _fetch: async (_url, opts) => {
+      capturedHeaders = opts.headers
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+
+  assert.ok(capturedHeaders['x-pugs-sync-secret'],
+    'sender requires the shared secret header — missing header causes 401 and silent outbound drop')
+  assert.equal(capturedHeaders['x-pugs-sync-secret'], 'test-secret')
+})
