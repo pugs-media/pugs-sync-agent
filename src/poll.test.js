@@ -695,6 +695,110 @@ test('flushJournal: does NOT clear entry when reportOutcome returns false (cloud
 })
 
 // ---------------------------------------------------------------------------
+// processBatch: dedup guard — duplicate item IDs within a single batch
+//
+// The cloud must never return the same queue item twice in a batch, but a
+// cloud bug or race could produce duplicates. Without a guard, processBatch
+// would dispatch the same iMessage twice — a client-comms error. The seenIds
+// Set in processBatch prevents the second occurrence from reaching the sender.
+// ---------------------------------------------------------------------------
+
+test('processBatch: dedup — second occurrence of same id is skipped, not dispatched', async () => {
+  const dispatched = []
+  const reported   = []
+  // Two items with the same id — the cloud should never do this, but we guard
+  // at this layer so a cloud bug cannot cause a double-send.
+  const items = [
+    { id: 'dup-1', to_handle: '+14155550100', body: 'First',  attempts: 0 },
+    { id: 'dup-1', to_handle: '+14155550100', body: 'Second', attempts: 0 },
+  ]
+
+  await processBatch(items, deps({
+    dispatchToLocalSender: async (item) => { dispatched.push(item.id) },
+    reportOutcome:         async (id, payload) => { reported.push({ id, status: payload.status }); return true },
+    journalMark:           () => {},
+    journalClear:          () => {},
+  }))
+
+  assert.equal(dispatched.length, 1, 'sender must be called exactly once — duplicate must be dropped')
+  assert.equal(dispatched[0], 'dup-1', 'first occurrence must be the one dispatched')
+  // Only one reportOutcome call (for the first occurrence); the second is silently skipped
+  assert.equal(reported.length, 1)
+  assert.equal(reported[0].status, 'sent')
+})
+
+test('processBatch: dedup — first occurrence dispatches normally, second is a no-op', async () => {
+  // Verifies that the guard does not affect the first occurrence:
+  // it must still go through the full send path.
+  const order = []
+  const items = [
+    { id: 42, to_handle: '+14155550100', body: 'Hello', attempts: 0 },
+    { id: 42, to_handle: '+14155550100', body: 'Hello', attempts: 0 },
+  ]
+
+  await processBatch(items, deps({
+    dispatchToLocalSender: async () => { order.push('dispatch') },
+    reportOutcome:         async () => { order.push('report'); return true },
+    journalMark:           ()     => { order.push('mark') },
+    journalClear:          ()     => { order.push('clear') },
+  }))
+
+  // Exactly one full send cycle; the duplicate triggers none of these
+  assert.deepEqual(order, ['dispatch', 'mark', 'report', 'clear'])
+})
+
+test('processBatch: dedup — numeric and string representation of the same id are treated as one', async () => {
+  // Coerces ids to string for comparison so 42 and "42" collapse to the same slot.
+  // Cloud IDs can be either type depending on the DB/serialiser used.
+  const dispatched = []
+  const items = [
+    { id: 42,   to_handle: '+14155550100', body: 'hi', attempts: 0 },
+    { id: '42', to_handle: '+14155550100', body: 'hi', attempts: 0 },
+  ]
+
+  await processBatch(items, deps({
+    dispatchToLocalSender: async (item) => { dispatched.push(item.id) },
+    reportOutcome: asyncNoop,
+  }))
+
+  assert.equal(dispatched.length, 1, 'numeric 42 and string "42" must collapse to the same dedup slot')
+})
+
+test('processBatch: dedup — distinct ids are all dispatched', async () => {
+  // Sanity-check: the guard must not affect items with different ids.
+  const dispatched = []
+  const items = [
+    { id: 'a', to_handle: '+14155550100', body: 'A', attempts: 0 },
+    { id: 'b', to_handle: '+14155550200', body: 'B', attempts: 0 },
+    { id: 'c', to_handle: '+14155550300', body: 'C', attempts: 0 },
+  ]
+
+  await processBatch(items, deps({
+    dispatchToLocalSender: async (item) => { dispatched.push(item.id) },
+    reportOutcome: asyncNoop,
+  }))
+
+  assert.deepEqual(dispatched.sort(), ['a', 'b', 'c'], 'all distinct ids must be dispatched')
+})
+
+test('processBatch: dedup — skip path of a duplicate id does not call the sender', async () => {
+  // If the first occurrence is sent (attempts=0) and the second is a duplicate,
+  // the duplicate must be dropped before reaching either the sender or the skip path.
+  const dispatched = []
+  const items = [
+    { id: 'sk-1', to_handle: '+14155550100', body: 'A', attempts: 0 },
+    { id: 'sk-1', to_handle: '+14155550100', body: 'A', attempts: MAX },  // would be skip
+  ]
+
+  await processBatch(items, deps({
+    dispatchToLocalSender: async (item) => { dispatched.push(item.id) },
+    reportOutcome: asyncNoop,
+  }))
+
+  assert.equal(dispatched.length, 1, 'duplicate must be dropped before skip or send path')
+})
+
+// ---------------------------------------------------------------------------
 // dispatchToLocalSender — request body and header contract
 //
 // The poller renames cloud-schema fields before forwarding to the local sender:

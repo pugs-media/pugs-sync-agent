@@ -172,6 +172,12 @@ async function processBatch(items, {
   journalMark  = () => {},
   journalClear = () => {},
 }) {
+  // Dedup guard: the cloud must never return the same queue item twice in one
+  // batch, but a double-dispatch is a client-comms error we prevent here.
+  // Tracked as strings so numeric and string representations of the same id
+  // (e.g. 42 vs "42") collapse to a single slot.
+  const seenIds = new Set()
+
   for (const item of items) {
     const plan = planItem(item, { maxAttempts })
 
@@ -179,6 +185,15 @@ async function processBatch(items, {
       log(`drop queue item (${plan.reason}):`, JSON.stringify(item).slice(0, 200))
       continue
     }
+
+    // item.id is present here (drop is the only id-less path)
+    const idKey = String(item.id)
+    if (seenIds.has(idKey)) {
+      log(`dedup skip ${item.id}: already processed in this batch — cloud returned a duplicate item`)
+      continue
+    }
+    seenIds.add(idKey)
+
     if (plan.action === 'skip') {
       log(`skip ${item.id}: attempts=${item.attempts} >= MAX_ATTEMPTS=${maxAttempts}`)
       // Report the skip so the cloud can reap the row. Without this the item
