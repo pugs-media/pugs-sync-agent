@@ -6,7 +6,8 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase } = require('./scan')
+const Database = require('better-sqlite3')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -677,4 +678,183 @@ test('contactsBase: strips path, query, and hash — only origin remains', () =>
   assert.ok(!base.includes('?'), 'query string must not appear in the base URL')
   assert.ok(!base.includes('#'), 'hash must not appear in the base URL')
   assert.ok(!base.includes('/api'), '/api path must not appear in the base URL')
+})
+
+// ── queryNewMessages: chat.db SQL query ───────────────────────────────────────
+// Integration tests against an in-memory SQLite DB that mirrors the chat.db
+// schema. These tests pin the load-bearing SQL behaviour so a regression
+// (wrong JOIN, missing CTE, LIMIT off-by-one, etc.) is caught immediately
+// rather than silently dropping or duplicating live lead messages.
+
+function createTestDb() {
+  const db = new Database(':memory:')
+  db.exec(`
+    CREATE TABLE message (
+      ROWID     INTEGER PRIMARY KEY,
+      guid      TEXT,
+      text      TEXT,
+      date      INTEGER DEFAULT 1,
+      is_from_me INTEGER DEFAULT 0,
+      service   TEXT DEFAULT 'iMessage',
+      account   TEXT,
+      handle_id INTEGER
+    );
+    CREATE TABLE handle (
+      ROWID INTEGER PRIMARY KEY,
+      id    TEXT
+    );
+    CREATE TABLE chat (
+      ROWID        INTEGER PRIMARY KEY,
+      guid         TEXT,
+      display_name TEXT
+    );
+    CREATE TABLE chat_message_join (
+      chat_id    INTEGER,
+      message_id INTEGER
+    );
+    CREATE TABLE chat_handle_join (
+      chat_id   INTEGER,
+      handle_id INTEGER
+    );
+  `)
+  return db
+}
+
+test('queryNewMessages: returns a message with its chat context (baseline)', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-guid-a', 'Test Chat');
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO message VALUES (100, 'msg-1', 'hello', 1, 0, 'iMessage', null, 1);
+    INSERT INTO chat_message_join VALUES (10, 100);
+  `)
+  const rows = queryNewMessages(db, 0, 200)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].rowid, 100)
+  assert.equal(rows[0].guid, 'msg-1')
+  assert.equal(rows[0].handle, '+14155550100')
+  assert.equal(rows[0].chat_guid, 'chat-guid-a')
+  assert.equal(rows[0].participant_count, 1)
+  db.close()
+})
+
+test('queryNewMessages: deduplicates message appearing in two chats — returns exactly one row', () => {
+  // iCloud-sync and backup-restore edge cases can create duplicate rows in
+  // chat_message_join for the same message_id. Without the first_chat CTE,
+  // the scanner would POST the same iMessage twice to the webhook.
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-guid-a', null);
+    INSERT INTO chat   VALUES (20, 'chat-guid-b', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO chat_handle_join VALUES (20, 1);
+    INSERT INTO message VALUES (100, 'msg-1', 'hello', 1, 0, 'iMessage', null, 1);
+    INSERT INTO chat_message_join VALUES (10, 100);
+    INSERT INTO chat_message_join VALUES (20, 100);
+  `)
+  const rows = queryNewMessages(db, 0, 200)
+  assert.equal(rows.length, 1, 'message in two chats must produce exactly one row')
+  assert.equal(rows[0].rowid, 100)
+  db.close()
+})
+
+test('queryNewMessages: picks the lower chat_id when message appears in multiple chats', () => {
+  // MIN(chat_id) in the first_chat CTE makes the chat-context selection
+  // deterministic — tests that the lower-id chat wins, not SQLite scan order.
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat   VALUES (20, 'chat-b', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO chat_handle_join VALUES (20, 1);
+    INSERT INTO message VALUES (100, 'msg-1', 'hi', 1, 0, 'iMessage', null, 1);
+    -- Insert higher-id chat first to verify MIN, not insertion order, wins
+    INSERT INTO chat_message_join VALUES (20, 100);
+    INSERT INTO chat_message_join VALUES (10, 100);
+  `)
+  const rows = queryNewMessages(db, 0, 200)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].chat_guid, 'chat-a', 'lower chat_id (10) must be selected, not higher (20)')
+  db.close()
+})
+
+test('queryNewMessages: highwater mark — only rows with ROWID > lastRowid are returned', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO message VALUES (50,  'msg-50',  'old',     1, 0, 'iMessage', null, 1);
+    INSERT INTO message VALUES (100, 'msg-100', 'current', 1, 0, 'iMessage', null, 1);
+    INSERT INTO message VALUES (150, 'msg-150', 'new',     1, 0, 'iMessage', null, 1);
+    INSERT INTO chat_message_join VALUES (10, 50);
+    INSERT INTO chat_message_join VALUES (10, 100);
+    INSERT INTO chat_message_join VALUES (10, 150);
+  `)
+  const rows = queryNewMessages(db, 100, 200)
+  assert.equal(rows.length, 1, 'only ROWID > 100 should be returned')
+  assert.equal(rows[0].rowid, 150)
+  db.close()
+})
+
+test('queryNewMessages: excludes messages with null or empty text', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO message VALUES (1, 'null-text',  null, 1, 0, 'iMessage', null, 1);
+    INSERT INTO message VALUES (2, 'empty-text', '',   1, 0, 'iMessage', null, 1);
+    INSERT INTO message VALUES (3, 'real-text',  'hi', 1, 0, 'iMessage', null, 1);
+    INSERT INTO chat_message_join VALUES (10, 1);
+    INSERT INTO chat_message_join VALUES (10, 2);
+    INSERT INTO chat_message_join VALUES (10, 3);
+  `)
+  const rows = queryNewMessages(db, 0, 200)
+  assert.equal(rows.length, 1, 'null and empty text must be excluded')
+  assert.equal(rows[0].guid, 'real-text')
+  db.close()
+})
+
+test('queryNewMessages: respects batchSize limit', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+  `)
+  for (let i = 1; i <= 10; i++) {
+    db.prepare(`INSERT INTO message VALUES (?, ?, 'msg', 1, 0, 'iMessage', null, 1)`).run(i, `guid-${i}`)
+    db.prepare(`INSERT INTO chat_message_join VALUES (10, ?)`).run(i)
+  }
+  const rows = queryNewMessages(db, 0, 3)
+  assert.equal(rows.length, 3, 'LIMIT must cap at batchSize')
+  assert.equal(rows[0].rowid, 1, 'results must be ordered by ROWID ASC')
+  assert.equal(rows[2].rowid, 3)
+  db.close()
+})
+
+test('queryNewMessages: returns participant list for a group chat', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO handle VALUES (2, '+16505551234');
+    INSERT INTO chat   VALUES (10, 'group-chat', 'Sales Thread');
+    INSERT INTO chat_handle_join VALUES (10, 1);
+    INSERT INTO chat_handle_join VALUES (10, 2);
+    INSERT INTO message VALUES (100, 'msg-1', 'group msg', 1, 0, 'iMessage', null, 1);
+    INSERT INTO chat_message_join VALUES (10, 100);
+  `)
+  const rows = queryNewMessages(db, 0, 200)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].participant_count, 2, 'group chat with 2 handles must report count=2')
+  assert.ok(rows[0].chat_participants_concat, 'chat_participants_concat must be non-null for group')
+  const parts = rows[0].chat_participants_concat.split('\x1f')
+  assert.equal(parts.length, 2)
+  assert.ok(parts.includes('+14155550100'))
+  assert.ok(parts.includes('+16505551234'))
+  db.close()
 })

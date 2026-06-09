@@ -235,6 +235,64 @@ async function fetchProspectHandles({
   throw lastError
 }
 
+/**
+ * Query new messages from a chat.db snapshot.
+ *
+ * Uses a first_chat CTE to deduplicate: a message appearing in multiple rows
+ * of chat_message_join (iCloud-sync and backup-restore edge cases) would
+ * otherwise generate N rows for the same ROWID, causing the webhook to receive
+ * the same iMessage multiple times. MIN(chat_id) makes the selection
+ * deterministic — ties resolve to the lower-numbered chat rather than
+ * whichever SQLite happens to return first.
+ *
+ * @param {import('better-sqlite3').Database} db  open snapshot DB
+ * @param {number} lastRowid   highwater mark — only rows with ROWID > lastRowid are returned
+ * @param {number} batchSize   maximum rows to return (LIMIT)
+ * @returns {object[]} raw chat.db rows
+ */
+function queryNewMessages(db, lastRowid, batchSize) {
+  return db.prepare(`
+    WITH chat_participant_counts AS (
+      SELECT chat_id, COUNT(*) AS participant_count
+      FROM chat_handle_join
+      GROUP BY chat_id
+    ),
+    first_chat AS (
+      SELECT message_id, MIN(chat_id) AS chat_id
+      FROM chat_message_join
+      GROUP BY message_id
+    )
+    SELECT
+      m.ROWID         AS rowid,
+      m.guid          AS guid,
+      m.text          AS text,
+      m.date          AS date,
+      m.is_from_me    AS is_from_me,
+      m.service       AS service,
+      m.account       AS account,
+      h.id            AS handle,
+      c.guid          AS chat_guid,
+      c.display_name  AS chat_display_name,
+      cpc.participant_count AS participant_count,
+      (
+        SELECT group_concat(h2.id, char(31))
+        FROM chat_handle_join chj2
+        JOIN handle h2 ON h2.ROWID = chj2.handle_id
+        WHERE chj2.chat_id = fc.chat_id
+      )               AS chat_participants_concat
+    FROM message m
+    LEFT JOIN handle h ON m.handle_id = h.ROWID
+    JOIN first_chat fc ON fc.message_id = m.ROWID
+    JOIN chat_participant_counts cpc ON cpc.chat_id = fc.chat_id
+    JOIN chat c ON c.ROWID = fc.chat_id
+    WHERE m.ROWID > ?
+      AND m.text IS NOT NULL
+      AND m.text != ''
+    ORDER BY m.ROWID ASC
+    LIMIT ?
+  `).all(lastRowid, batchSize)
+}
+
 async function main() {
   if (!fs.existsSync(CHAT_DB)) {
     console.error(`chat.db not found at ${CHAT_DB}`)
@@ -311,41 +369,7 @@ async function main() {
     // chat-context (added 2026-05-21, migration 049): we also pull the chat
     // row's GUID, display_name, and the concatenated participant handles so
     // pugs-sales can give every message a stable thread identity.
-    const rows = db.prepare(`
-      WITH chat_participant_counts AS (
-        SELECT chat_id, COUNT(*) AS participant_count
-        FROM chat_handle_join
-        GROUP BY chat_id
-      )
-      SELECT
-        m.ROWID         AS rowid,
-        m.guid          AS guid,
-        m.text          AS text,
-        m.date          AS date,
-        m.is_from_me    AS is_from_me,
-        m.service       AS service,
-        m.account       AS account,
-        h.id            AS handle,
-        c.guid          AS chat_guid,
-        c.display_name  AS chat_display_name,
-        cpc.participant_count AS participant_count,
-        (
-          SELECT group_concat(h2.id, char(31))
-          FROM chat_handle_join chj2
-          JOIN handle h2 ON h2.ROWID = chj2.handle_id
-          WHERE chj2.chat_id = cmj.chat_id
-        )               AS chat_participants_concat
-      FROM message m
-      LEFT JOIN handle h ON m.handle_id = h.ROWID
-      JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-      JOIN chat_participant_counts cpc ON cpc.chat_id = cmj.chat_id
-      JOIN chat c ON c.ROWID = cmj.chat_id
-      WHERE m.ROWID > ?
-        AND m.text IS NOT NULL
-        AND m.text != ''
-      ORDER BY m.ROWID ASC
-      LIMIT ?
-    `).all(cutoffRowid, BATCH_SIZE)
+    const rows = queryNewMessages(db, cutoffRowid, BATCH_SIZE)
 
     if (!rows.length) {
       // Post empty payload so the server records a heartbeat — otherwise
@@ -448,4 +472,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages }
