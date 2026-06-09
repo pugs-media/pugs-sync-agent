@@ -400,9 +400,10 @@ async function main() {
 
   // On very first run, derive a cutoff from INITIAL_BACKFILL_DAYS to avoid
   // dumping years of history in one request.
-  const snapshotPath = snapshotDb()
+  let snapshotPath
   let db
   try {
+    snapshotPath = snapshotDb()
     db = new Database(snapshotPath, { readonly: true })
     assertChatDbSchema(db)
 
@@ -490,7 +491,7 @@ async function main() {
     } // end else (rows.length > 0)
   } finally {
     if (db) db.close()
-    cleanupSnapshot(snapshotPath)
+    if (snapshotPath) cleanupSnapshot(snapshotPath)
   }
 
   // Contacts enrichment — POST (name, phone) and (name, email) pairs from
