@@ -63,3 +63,35 @@ test('update.sh: npm install failure logs the captured npm output', () => {
     'npm install output must be captured (npm_out) and printed on failure'
   )
 })
+
+// ── launchctl reload guard ──────────────────────────────────────────────────
+
+test('update.sh: launchctl load failure causes exit with error code', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // If a service fails to reload, the script must exit with code 1
+  // (not silently claim success with "services reloaded").
+  assert.ok(
+    src.includes('reload_failed'),
+    'script must track reload failures in a variable'
+  )
+  assert.ok(
+    src.includes('exit 1') && src.includes('reload_failed') && src.includes('service reload failed'),
+    'script must exit with code 1 if any service reload fails'
+  )
+})
+
+test('update.sh: successful reload shows clear success message', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // The final success message only appears after the reload guard passes.
+  assert.ok(
+    src.includes('services reloaded on $NEW_HEAD'),
+    'final success message must say services are reloaded'
+  )
+  // Verify that the success message comes AFTER the reload guard.
+  const reloadGuardIndex = src.indexOf('if [ "$reload_failed" -eq 1 ]')
+  const successMsgIndex = src.indexOf('services reloaded on $NEW_HEAD')
+  assert.ok(
+    reloadGuardIndex < successMsgIndex,
+    'success message must come after the reload_failed guard'
+  )
+})

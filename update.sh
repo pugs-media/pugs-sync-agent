@@ -131,14 +131,23 @@ fi
 
 # Reload the three runtime services. Updater itself doesn't reload itself
 # (launchd will pick up plist changes on the next StartInterval tick).
+# If any service fails to reload, the entire update is treated as failed
+# (exit 1) so update.log shows a clear error and the watchdog can alert.
+reload_failed=0
 for kind in scanner sender poller; do
   dst="$LAUNCH_DIR/com.pugs.syncagent.$kind.plist"
   if [ -f "$dst" ]; then
     launchctl unload "$dst" 2>/dev/null
     if ! launchctl load "$dst" 2>&1; then
       echo "$LOG_PREFIX launchctl load $kind failed"
+      reload_failed=1
     fi
   fi
 done
+
+if [ "$reload_failed" -eq 1 ]; then
+  echo "$LOG_PREFIX service reload failed — update rolled back to previous version"
+  exit 1
+fi
 
 echo "$LOG_PREFIX services reloaded on $NEW_HEAD"
