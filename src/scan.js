@@ -194,19 +194,24 @@ async function fetchProspectHandles({
   const url  = `${base}/api/sync/prospect-handles`
   let lastError
   for (let attempt = 1; attempt <= MAX_PROSPECT_FETCH_TRIES; attempt++) {
+    let res
     try {
-      const res = await fetchWithTimeout(url, {
+      res = await fetchWithTimeout(url, {
         headers: { 'x-pugs-sync-secret': secret, 'x-pugs-scanner-id': scannerId },
       }, _timeoutMs, _fetch)
-      if (res.ok) {
-        const j = await res.json()
-        return parseProspectHandles(j)
-      }
-      const errText = (await res.text()).slice(0, 200)
-      lastError = new Error(`prospect-handles ${res.status}: ${errText}`)
     } catch (e) {
       lastError = e
+      if (attempt < MAX_PROSPECT_FETCH_TRIES) await _delay(500 * attempt)
+      continue
     }
+    if (res.ok) {
+      const j = await res.json()
+      return parseProspectHandles(j)
+    }
+    const errText = (await res.text()).slice(0, 200)
+    const err = new Error(`prospect-handles ${res.status}: ${errText}`)
+    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    lastError = err
     if (attempt < MAX_PROSPECT_FETCH_TRIES) await _delay(500 * attempt)
   }
   throw lastError
