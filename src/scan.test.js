@@ -281,6 +281,24 @@ test('fetchProspectHandles: throws when cloud returns phones as a string (would 
   )
 })
 
+test('fetchProspectHandles: throws descriptive error when HTTP 200 body is not valid JSON', async () => {
+  // Cloud can return an HTML cold-start error page with HTTP 200; res.json() throws
+  // in that case and without a try/catch it would propagate as an untyped exception.
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch: async () => ({
+        ok:   true,
+        json: async () => { throw new Error('Unexpected token <') },
+      }),
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+    }),
+    /prospect-handles 200 bad JSON/,
+  )
+})
+
 test('fetchProspectHandles: throws when cloud returns emails as an object', async () => {
   const _fetch = async () => ({
     ok: true,

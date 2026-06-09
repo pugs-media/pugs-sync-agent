@@ -205,7 +205,12 @@ async function fetchProspectHandles({
       continue
     }
     if (res.ok) {
-      const j = await res.json()
+      let j
+      try {
+        j = await res.json()
+      } catch (e) {
+        throw new Error(`prospect-handles 200 bad JSON: ${e.message}`)
+      }
       return parseProspectHandles(j)
     }
     const errText = (await res.text()).slice(0, 200)
