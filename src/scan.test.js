@@ -7,7 +7,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
 const Database = require('better-sqlite3')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages, shouldSyncContacts } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, queryNewMessages, shouldSyncContacts } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -917,4 +917,69 @@ test('shouldSyncContacts: new-drafts trigger reports correct count in trigger st
   const lastContactsAt = new Date(base - 120_000).toISOString()
   const { trigger } = shouldSyncContacts(lastContactsAt, 7, { now: base })
   assert.equal(trigger, '7 new draft(s)')
+})
+
+// ── assertChatDbSchema ────────────────────────────────────────────────────────
+// These tests guard the macOS-upgrade schema risk: if Apple renames or removes
+// a column we query, assertChatDbSchema must throw a clear, diagnosable error
+// rather than letting queryNewMessages crash mid-scan with a cryptic SQL error
+// (or worse, return silent wrong data). Uses the same in-memory SQLite fixture
+// as the queryNewMessages tests.
+
+test('assertChatDbSchema: passes with the expected schema', () => {
+  const db = createTestDb()
+  assert.doesNotThrow(() => assertChatDbSchema(db))
+  db.close()
+})
+
+test('assertChatDbSchema: throws when a required column is missing', () => {
+  const db = new Database(':memory:')
+  // message table missing 'is_from_me' — simulates a macOS schema change
+  db.exec(`
+    CREATE TABLE message (
+      ROWID     INTEGER PRIMARY KEY,
+      guid      TEXT,
+      text      TEXT,
+      date      INTEGER,
+      service   TEXT,
+      account   TEXT,
+      handle_id INTEGER
+    );
+    CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+    CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT);
+    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+    CREATE TABLE chat_handle_join  (chat_id INTEGER, handle_id  INTEGER);
+  `)
+  assert.throws(
+    () => assertChatDbSchema(db),
+    (err) => {
+      assert.ok(err.message.includes('is_from_me'), `error must name the missing column; got: ${err.message}`)
+      assert.ok(err.message.includes('macOS'), `error must mention macOS; got: ${err.message}`)
+      return true
+    }
+  )
+  db.close()
+})
+
+test('assertChatDbSchema: throws when a required table is missing', () => {
+  const db = new Database(':memory:')
+  // chat_handle_join absent — simulates a macOS schema change
+  db.exec(`
+    CREATE TABLE message (
+      ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date INTEGER,
+      is_from_me INTEGER, service TEXT, account TEXT, handle_id INTEGER
+    );
+    CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+    CREATE TABLE chat   (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT);
+    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+  `)
+  assert.throws(
+    () => assertChatDbSchema(db),
+    (err) => {
+      assert.ok(err.message.includes('chat_handle_join'), `error must name the missing table; got: ${err.message}`)
+      assert.ok(err.message.includes('macOS'), `error must mention macOS; got: ${err.message}`)
+      return true
+    }
+  )
+  db.close()
 })
