@@ -7,7 +7,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
 const Database = require('better-sqlite3')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages, shouldSyncContacts } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -857,4 +857,64 @@ test('queryNewMessages: returns participant list for a group chat', () => {
   assert.ok(parts.includes('+14155550100'))
   assert.ok(parts.includes('+16505551234'))
   db.close()
+})
+
+// ── shouldSyncContacts ────────────────────────────────────────────────────────
+// shouldSyncContacts decides whether to run an AddressBook sync on a given tick.
+// These tests are the primary guard for the correctness invariant: the hourly
+// fallback MUST fire even when the scanner found zero new messages (no early
+// return). Without this guarantee, address-book renames go stale indefinitely
+// during quiet (no-new-lead) periods.
+
+const HOUR_MS = 60 * 60 * 1000
+
+test('shouldSyncContacts: hourly fallback fires when >1h since last sync, no new drafts', () => {
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - HOUR_MS - 1).toISOString()
+  const { should, trigger } = shouldSyncContacts(lastContactsAt, 0, { now: base })
+  assert.equal(should, true)
+  assert.equal(trigger, 'hourly fallback')
+})
+
+test('shouldSyncContacts: does not fire when synced <1h ago and no new drafts', () => {
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - 30 * 60 * 1000).toISOString() // 30min ago
+  const { should } = shouldSyncContacts(lastContactsAt, 0, { now: base })
+  assert.equal(should, false)
+})
+
+test('shouldSyncContacts: new-drafts path fires when drafts created and >60s since last sync', () => {
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - 120_000).toISOString() // 2min ago
+  const { should, trigger } = shouldSyncContacts(lastContactsAt, 3, { now: base })
+  assert.equal(should, true)
+  assert.equal(trigger, '3 new draft(s)')
+})
+
+test('shouldSyncContacts: new-drafts throttle — does not fire when last sync was <60s ago', () => {
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - 30_000).toISOString() // 30s ago
+  const { should } = shouldSyncContacts(lastContactsAt, 5, { now: base })
+  assert.equal(should, false, 'throttle active: last sync was only 30s ago')
+})
+
+test('shouldSyncContacts: fires when never synced before (lastContactsAt null)', () => {
+  const { should, trigger } = shouldSyncContacts(null, 0)
+  assert.equal(should, true)
+  assert.equal(trigger, 'hourly fallback')
+})
+
+test('shouldSyncContacts: does not fire at exact interval boundary (sinceLastSync === HOUR_MS)', () => {
+  // sinceLastSync > intervalMs requires strictly greater — exact equality should not trigger.
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - HOUR_MS).toISOString()
+  const { should } = shouldSyncContacts(lastContactsAt, 0, { now: base })
+  assert.equal(should, false, 'equal-to-interval must not fire; only strictly greater triggers sync')
+})
+
+test('shouldSyncContacts: new-drafts trigger reports correct count in trigger string', () => {
+  const base = 1_700_000_000_000
+  const lastContactsAt = new Date(base - 120_000).toISOString()
+  const { trigger } = shouldSyncContacts(lastContactsAt, 7, { now: base })
+  assert.equal(trigger, '7 new draft(s)')
 })
