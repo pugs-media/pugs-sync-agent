@@ -106,6 +106,44 @@ test('fetchProspectHandles: throws after all 3 attempts fail with non-2xx', asyn
   assert.equal(calls, 3, 'should have attempted exactly 3 times before throwing')
 })
 
+test('fetchProspectHandles: does not retry on 401 (permanent auth failure)', async () => {
+  let calls = 0
+  const _fetch = async () => {
+    calls++
+    return { ok: false, status: 401, text: async () => 'Unauthorized' }
+  }
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'wrong-secret',
+      scannerId:  '',
+    }),
+    /prospect-handles 401/,
+  )
+  assert.equal(calls, 1, 'should not retry on 4xx — permanent error, retrying wastes time')
+})
+
+test('fetchProspectHandles: does not retry on 403 (permanent auth failure)', async () => {
+  let calls = 0
+  const _fetch = async () => {
+    calls++
+    return { ok: false, status: 403, text: async () => 'Forbidden' }
+  }
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'wrong-secret',
+      scannerId:  '',
+    }),
+    /prospect-handles 403/,
+  )
+  assert.equal(calls, 1, 'should not retry on 4xx — permanent error, retrying wastes time')
+})
+
 test('fetchProspectHandles: retries on network error and succeeds on next attempt', async () => {
   let calls = 0
   const body = { phones: ['4155550100'], emails: [], count_phones: 1, count_emails: 0 }
