@@ -104,10 +104,12 @@ if ! git fetch --quiet 2>&1; then
   exit 0
 fi
 
-if ! git merge --ff-only origin/main >/dev/null 2>&1; then
+merge_out=$(git merge --ff-only origin/main 2>&1)
+if [ $? -ne 0 ]; then
   # FF-only fails when there are local commits/edits OR when origin diverged.
   # We don't auto-resolve — Connor or Charlie has to sort it.
   echo "$LOG_PREFIX fast-forward merge failed (local changes or diverged), bailing"
+  echo "$LOG_PREFIX merge detail: $(echo "$merge_out" | head -5 | tr '\n' '|')"
   exit 0
 fi
 
@@ -119,10 +121,11 @@ fi
 
 echo "$LOG_PREFIX pulled $OLD_HEAD..$NEW_HEAD"
 
-# Reinstall deps in case package.json changed. --no-audit --no-fund for speed
-# and to avoid noisy logs.
-if ! npm install --silent --no-audit --no-fund 2>&1; then
+# Reinstall deps in case package.json changed. --no-audit --no-fund for speed;
+# --loglevel error keeps errors visible while suppressing progress/info noise.
+if ! npm_out=$(npm install --loglevel error --no-audit --no-fund 2>&1); then
   echo "$LOG_PREFIX npm install failed — NOT reloading services, prior version still running"
+  printf '%s\n' "$npm_out" | head -20 | sed "s|^|$LOG_PREFIX npm: |"
   exit 1
 fi
 
