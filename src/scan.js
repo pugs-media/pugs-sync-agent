@@ -82,6 +82,19 @@ function parseNewDraftsCount(text) {
   }
 }
 
+/**
+ * Derive the contacts-sync webhook base URL from the inbound webhook URL.
+ * Uses URL.origin (scheme + host + port) — NOT a regex path-strip — so it
+ * works correctly regardless of the webhook path (e.g. staging URLs without
+ * '/api/' in the path). Mirrors the same approach used by fetchProspectHandles.
+ *
+ * @param {string} webhookUrl  e.g. https://pugs-sales.vercel.app/api/import/imessage
+ * @returns {string}           e.g. https://pugs-sales.vercel.app
+ */
+function contactsBase(webhookUrl) {
+  return new URL(webhookUrl).origin
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Main
 
@@ -413,7 +426,7 @@ async function main() {
   if (shouldRunForNewDrafts || shouldRunForFallback) {
     const trigger = shouldRunForNewDrafts ? `${newDraftsThisRun} new draft(s)` : 'hourly fallback'
     console.log(`Contacts sync trigger: ${trigger}`)
-    const webhookBase = WEBHOOK_URL.replace(/\/api\/.*$/, '')
+    const webhookBase = contactsBase(WEBHOOK_URL)
     try {
       const res = await syncContacts({ webhookBase, secret: SECRET, scannerId: SCANNER_ID })
       console.log('Contacts sync:', JSON.stringify(res))
@@ -435,4 +448,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase }
