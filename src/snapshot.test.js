@@ -64,6 +64,32 @@ test('snapshotSqlite: copies the -wal even if -shm is absent (independent sideca
   assert.equal(fs.existsSync(dest + '-shm'), false)
 })
 
+test('snapshotSqlite: records written paths in error.writtenPath when sidecar copy fails', () => {
+  const src = write('chat.db', 'MAIN')
+  write('chat.db-wal', 'WAL')
+  write('chat.db-shm', 'SHM')  // Create the source -shm file so snapshotSqlite will try to copy it.
+  const dest = path.join(dir, 'snap.db')
+
+  // Make -shm copy fail by creating a directory at that path (permission denied when trying to write file).
+  fs.mkdirSync(dest + '-shm')
+
+  let caught
+  try {
+    snapshotSqlite(src, dest)
+    assert.fail('should have thrown when -shm copy fails')
+  } catch (e) {
+    caught = e
+  }
+
+  // Main file was written, -wal was written, but -shm copy failed.
+  assert.deepEqual(caught.writtenPath, [dest, dest + '-wal'])
+  assert.ok(caught.cause, 'original error should be attached as cause')
+  // Main and -wal exist on disk.
+  assert.equal(fs.existsSync(dest), true)
+  assert.equal(fs.existsSync(dest + '-wal'), true)
+  // The caller can now use caught.writtenPath to clean up before re-throwing.
+})
+
 // ── cleanupSnapshot ───────────────────────────────────────────────────────────
 
 test('cleanupSnapshot: removes the snapshot and every sidecar', () => {

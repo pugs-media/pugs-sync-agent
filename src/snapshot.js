@@ -31,9 +31,14 @@ const WAL_SUFFIXES = ['-wal', '-shm']
  * location. The main file is copied first, then each sidecar that exists, so
  * the read-only open of `destPath` sees un-checkpointed rows still in the WAL.
  *
+ * If a sidecar copy fails (disk full, permission denied), throws AFTER recording
+ * what was successfully written. This allows the caller to clean up any partial
+ * snapshot (main + partial sidecars) without temp-file leaks.
+ *
  * @param {string} srcPath  source database path (e.g. .../chat.db)
  * @param {string} destPath snapshot database path to write
  * @returns {string[]} the paths written (main file first, then any sidecars)
+ * @throws error with `.writtenPath` property set to paths written before failure
  */
 function snapshotSqlite(srcPath, destPath) {
   fs.copyFileSync(srcPath, destPath)
@@ -42,8 +47,17 @@ function snapshotSqlite(srcPath, destPath) {
     const srcSidecar = srcPath + suffix
     if (fs.existsSync(srcSidecar)) {
       const destSidecar = destPath + suffix
-      fs.copyFileSync(srcSidecar, destSidecar)
-      written.push(destSidecar)
+      try {
+        fs.copyFileSync(srcSidecar, destSidecar)
+        written.push(destSidecar)
+      } catch (e) {
+        // Create a new error so we can attach writtenPath without worrying
+        // about the original error object's structure.
+        const err = new Error(`snapshot sidecar copy failed: ${e.message}`)
+        err.writtenPath = written
+        err.cause = e
+        throw err
+      }
     }
   }
   return written

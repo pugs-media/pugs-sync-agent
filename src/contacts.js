@@ -48,6 +48,16 @@ function findAddressBooks() {
 // file. snapshotSqlite copies the sidecars too so the read-only open replays
 // the WAL and sees them — same fix the scanner uses for chat.db. See
 // ./snapshot.js.
+/**
+ * Copy an AddressBook to a snapshot. Returns the dest path on success.
+ * On partial failure (main written, sidecar copy failed), throws after
+ * recording written paths in error.writtenPath so the caller can clean up
+ * without temp-file leaks.
+ *
+ * @param {string} srcPath
+ * @returns {string} dest path
+ * @throws with error.writtenPath = [...paths written before failure]
+ */
 function snapshot(srcPath) {
   const dest = path.join(os.tmpdir(), `pugs-ab-${Date.now()}-${Math.random().toString(36).slice(2)}.db`)
   snapshotSqlite(srcPath, dest)
@@ -238,11 +248,25 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
   const snapshots = []
   try {
     for (const src of books) {
-      const snap = snapshot(src)
-      snapshots.push(snap)
-      const { phones, emails } = extractFromDb(snap)
-      rawPhones.push(...phones)
-      rawEmails.push(...emails)
+      try {
+        const snap = snapshot(src)
+        snapshots.push(snap)
+        const { phones, emails } = extractFromDb(snap)
+        rawPhones.push(...phones)
+        rawEmails.push(...emails)
+      } catch (e) {
+        // snapshot() can fail partway: main file written, sidecar copy failed.
+        // Record what was written in error.writtenPath so the finally block can clean it up.
+        if (e.writtenPath) {
+          for (const p of e.writtenPath) {
+            snapshots.push(p)
+          }
+        }
+        // Log but don't throw — contacts sync is enrichment-only; one corrupt
+        // AddressBook should not stop the sync of others.
+        console.error(`syncContacts: snapshot failed for ${src}: ${e.message}`)
+        continue
+      }
     }
 
     // Canonicalize + union across all sources (pure + unit-tested).
@@ -262,6 +286,7 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
   } finally {
     // cleanupSnapshot removes the main file AND its -wal/-shm sidecars (which
     // snapshot() now copies) — a plain unlink would leak the sidecars.
+    // Includes partially-written snapshots from any failed snapshot() calls.
     for (const s of snapshots) {
       cleanupSnapshot(s)
     }
