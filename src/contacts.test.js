@@ -411,6 +411,65 @@ test('syncContacts no-address-books: uses _fetch not bare global fetch', async (
   assert.ok(fetchCalled, '_fetch injection must be called (not bare global fetch)')
 })
 
+test('syncContacts no-address-books: retries on 503 and succeeds on second attempt', async () => {
+  // Before the fix, the no-books heartbeat used a bare fetchWithTimeout with no
+  // retry. A transient Vercel cold-start would silently drop it. Now it goes
+  // through postContactsPayload and gets the same 3-retry contract.
+  let calls = 0
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 503, text: async () => 'Service Unavailable' }
+      return { ok: true, status: 200, text: async () => '{"ok":true}' }
+    },
+    _delay: async () => {},
+    ...NO_BOOKS,
+  })
+  assert.equal(calls, 2, 'should retry once on 503 and succeed')
+  assert.ok(result.ok)
+  assert.equal(result.skipped, 'no_address_books_found')
+})
+
+test('syncContacts no-address-books: fails after all retries exhausted on persistent 5xx', async () => {
+  let calls = 0
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'test-secret',
+    scannerId: '',
+    _fetch: async () => {
+      calls++
+      return { ok: false, status: 503, text: async () => 'Service Unavailable' }
+    },
+    _delay: async () => {},
+    ...NO_BOOKS,
+  })
+  assert.equal(calls, 3, 'should exhaust 3 attempts before giving up')
+  assert.equal(result.ok, false)
+  assert.equal(result.skipped, 'no_address_books_found_and_post_failed')
+  assert.ok(result.error, 'error message must be present')
+})
+
+test('syncContacts no-address-books: does not retry on 401 (permanent auth failure)', async () => {
+  let calls = 0
+  const result = await syncContacts({
+    webhookBase: 'https://example.pugs.media',
+    secret: 'bad-secret',
+    scannerId: '',
+    _fetch: async () => {
+      calls++
+      return { ok: false, status: 401, text: async () => 'Unauthorized' }
+    },
+    _delay: async () => {},
+    ...NO_BOOKS,
+  })
+  assert.equal(calls, 1, '4xx must not be retried')
+  assert.equal(result.ok, false)
+  assert.equal(result.skipped, 'no_address_books_found_and_post_failed')
+})
+
 // ── syncContacts: _findAddressBooks throws (e.g. EACCES) ─────────────────────
 // If the AddressBook Sources directory exists but is not readable, findAddressBooks
 // throws EACCES. syncContacts must not propagate that — it should degrade to the
