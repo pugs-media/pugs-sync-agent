@@ -117,6 +117,10 @@ async function reportOutcome(id, payload, {
       }, _timeoutMs, _fetch)
       if (res.ok) return
       const errText = (await res.text()).slice(0, 200)
+      if (res.status >= 400 && res.status < 500) {
+        log(`report-outcome ${id} permanent error ${res.status} — not retrying: ${errText}`)
+        return
+      }
       if (attempt < MAX_REPORT_TRIES) { await _delay(500 * attempt); continue }
       log(`report-outcome ${id} failed after ${MAX_REPORT_TRIES} attempts: ${res.status} ${errText}`)
     } catch (e) {
