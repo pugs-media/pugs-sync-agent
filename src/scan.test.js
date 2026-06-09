@@ -961,6 +961,97 @@ test('assertChatDbSchema: throws when a required column is missing', () => {
   db.close()
 })
 
+// ── queryNewMessages: full-batch pagination ───────────────────────────────────
+// When there are more unprocessed rows than BATCH_SIZE, the scanner runs
+// multiple times: each run advances the cursor to the last ROWID it fetched
+// and the next run picks up where the previous left off. These tests verify
+// that the cursor handoff is exact — no rows skipped at the batch boundary
+// and no rows duplicated across consecutive calls.
+//
+// This is the silent lead-loss scenario: Connor's Mac comes back online after
+// hours offline; many messages are queued; if the ROWID > cursor condition had
+// an off-by-one or the batch boundary was mis-handled, messages near the
+// boundary would be lost forever with no error logged.
+
+test('queryNewMessages: pagination — second batch starts immediately after first batch cursor', () => {
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+  `)
+  for (let i = 1; i <= 5; i++) {
+    db.prepare(`INSERT INTO message VALUES (?, ?, 'msg', 1, 0, 'iMessage', null, 1)`).run(i, `guid-${i}`)
+    db.prepare(`INSERT INTO chat_message_join VALUES (10, ?)`).run(i)
+  }
+
+  const batch1 = queryNewMessages(db, 0, 3)
+  assert.equal(batch1.length, 3)
+  assert.deepEqual(batch1.map(r => r.rowid), [1, 2, 3], 'first batch must be rows 1–3 in ROWID order')
+
+  // Simulate the cursor advance that main() performs after a successful POST
+  const cursor = batch1[batch1.length - 1].rowid  // = 3
+
+  const batch2 = queryNewMessages(db, cursor, 3)
+  assert.equal(batch2.length, 2, 'second batch must contain only the 2 remaining rows')
+  assert.deepEqual(batch2.map(r => r.rowid), [4, 5], 'second batch must start at ROWID 4, not re-fetch ROWID 3')
+
+  db.close()
+})
+
+test('queryNewMessages: pagination — no overlap between consecutive batches', () => {
+  // Verifies the ROWID > cursor condition (strictly greater) — if it were >=,
+  // the last row of batch 1 would re-appear as the first row of batch 2.
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+  `)
+  for (let i = 1; i <= 6; i++) {
+    db.prepare(`INSERT INTO message VALUES (?, ?, 'msg', 1, 0, 'iMessage', null, 1)`).run(i, `guid-${i}`)
+    db.prepare(`INSERT INTO chat_message_join VALUES (10, ?)`).run(i)
+  }
+
+  const batch1 = queryNewMessages(db, 0, 3)
+  const cursor = batch1[batch1.length - 1].rowid  // = 3
+  const batch2 = queryNewMessages(db, cursor, 3)
+
+  const batch1Ids = new Set(batch1.map(r => r.rowid))
+  const batch2Ids = batch2.map(r => r.rowid)
+  for (const id of batch2Ids) {
+    assert.ok(!batch1Ids.has(id), `ROWID ${id} must not appear in both batches — cursor condition is wrong`)
+  }
+  assert.deepEqual(batch2Ids, [4, 5, 6], 'second batch must contain exactly rows 4–6')
+
+  db.close()
+})
+
+test('queryNewMessages: pagination — third call returns empty after all rows consumed', () => {
+  // Verifies the loop terminates: when the cursor is at the highest ROWID, the
+  // next call returns [] so the scanner knows it has processed everything.
+  const db = createTestDb()
+  db.exec(`
+    INSERT INTO handle VALUES (1, '+14155550100');
+    INSERT INTO chat   VALUES (10, 'chat-a', null);
+    INSERT INTO chat_handle_join VALUES (10, 1);
+  `)
+  for (let i = 1; i <= 4; i++) {
+    db.prepare(`INSERT INTO message VALUES (?, ?, 'msg', 1, 0, 'iMessage', null, 1)`).run(i, `guid-${i}`)
+    db.prepare(`INSERT INTO chat_message_join VALUES (10, ?)`).run(i)
+  }
+
+  const batch1 = queryNewMessages(db, 0, 3)
+  const cursor1 = batch1[batch1.length - 1].rowid  // = 3
+  const batch2 = queryNewMessages(db, cursor1, 3)
+  const cursor2 = batch2[batch2.length - 1].rowid  // = 4
+  const batch3 = queryNewMessages(db, cursor2, 3)
+
+  assert.equal(batch3.length, 0, 'call after all rows consumed must return empty — scanner should stop and exit')
+
+  db.close()
+})
+
 test('assertChatDbSchema: throws when a required table is missing', () => {
   const db = new Database(':memory:')
   // chat_handle_join absent — simulates a macOS schema change
