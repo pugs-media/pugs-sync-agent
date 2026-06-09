@@ -1,0 +1,94 @@
+'use strict'
+
+const { test } = require('node:test')
+const assert   = require('node:assert/strict')
+const fs       = require('fs')
+const os       = require('os')
+const path     = require('path')
+const { mark, clear, list } = require('./dispatch-journal')
+
+// Each test uses its own temp file so tests are fully isolated.
+let counter = 0
+function tmpPath() {
+  return path.join(os.tmpdir(), `dispatch-journal-test-${process.pid}-${++counter}.ndjson`)
+}
+
+test('list: returns empty array when file does not exist', () => {
+  const journalPath = tmpPath()
+  assert.deepEqual(list({ journalPath }), [])
+})
+
+test('mark: creates file with one entry, list returns that id', () => {
+  const journalPath = tmpPath()
+  mark('abc', { journalPath })
+  assert.deepEqual(list({ journalPath }), ['abc'])
+  fs.unlinkSync(journalPath)
+})
+
+test('mark: multiple calls accumulate entries', () => {
+  const journalPath = tmpPath()
+  mark('x1', { journalPath })
+  mark('x2', { journalPath })
+  mark('x3', { journalPath })
+  assert.deepEqual(list({ journalPath }), ['x1', 'x2', 'x3'])
+  fs.unlinkSync(journalPath)
+})
+
+test('clear: removes the specified id from the journal', () => {
+  const journalPath = tmpPath()
+  mark('a', { journalPath })
+  mark('b', { journalPath })
+  mark('c', { journalPath })
+  clear('b', { journalPath })
+  assert.deepEqual(list({ journalPath }), ['a', 'c'])
+  fs.unlinkSync(journalPath)
+})
+
+test('clear: deletes the file when it was the last entry', () => {
+  const journalPath = tmpPath()
+  mark('solo', { journalPath })
+  clear('solo', { journalPath })
+  assert.equal(fs.existsSync(journalPath), false, 'file should be deleted when empty')
+})
+
+test('clear: is a no-op when file does not exist', () => {
+  const journalPath = tmpPath()
+  // Should not throw
+  clear('missing', { journalPath })
+  assert.deepEqual(list({ journalPath }), [])
+})
+
+test('clear: is a no-op when id is not in the journal', () => {
+  const journalPath = tmpPath()
+  mark('present', { journalPath })
+  clear('absent', { journalPath })
+  assert.deepEqual(list({ journalPath }), ['present'])
+  fs.unlinkSync(journalPath)
+})
+
+test('list: skips corrupt lines and returns valid ids', () => {
+  const journalPath = tmpPath()
+  mark('good1', { journalPath })
+  fs.appendFileSync(journalPath, 'NOT_JSON\n')
+  mark('good2', { journalPath })
+  assert.deepEqual(list({ journalPath }), ['good1', 'good2'])
+  fs.unlinkSync(journalPath)
+})
+
+test('clear: preserves corrupt lines when clearing a valid id', () => {
+  const journalPath = tmpPath()
+  mark('valid', { journalPath })
+  fs.appendFileSync(journalPath, 'BAD_LINE\n')
+  clear('valid', { journalPath })
+  // File should still exist (corrupt line remains), but valid id is gone
+  assert.deepEqual(list({ journalPath }), [])
+  fs.unlinkSync(journalPath)
+})
+
+test('list: returns numeric ids correctly', () => {
+  const journalPath = tmpPath()
+  mark(42, { journalPath })
+  mark(99, { journalPath })
+  assert.deepEqual(list({ journalPath }), [42, 99])
+  fs.unlinkSync(journalPath)
+})
