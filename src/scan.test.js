@@ -6,7 +6,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -641,4 +641,40 @@ test('sendHeartbeat: aborts after _timeoutMs when cloud hangs', async () => {
     }),
     { name: 'AbortError' },
   )
+})
+
+// ── contactsBase ─────────────────────────────────────────────────────────────
+// contactsBase derives the base URL for contacts-sync from the inbound webhook
+// URL. It MUST use URL.origin (not a regex path-strip) so staging/custom URLs
+// without '/api/' in the path don't silently post to the wrong endpoint.
+
+test('contactsBase: returns the origin (scheme+host) of the standard webhook URL', () => {
+  assert.equal(
+    contactsBase('https://pugs-sales.vercel.app/api/import/imessage'),
+    'https://pugs-sales.vercel.app',
+  )
+})
+
+test('contactsBase: works for a staging URL without /api/ in the path', () => {
+  // A regex-strip of /api/... would return the full URL unchanged for this shape,
+  // producing a broken base. URL.origin always returns just scheme+host.
+  assert.equal(
+    contactsBase('https://staging.pugs.media/webhook/imessage'),
+    'https://staging.pugs.media',
+  )
+})
+
+test('contactsBase: preserves port when present', () => {
+  assert.equal(
+    contactsBase('https://dev.pugs.media:3000/api/import/imessage'),
+    'https://dev.pugs.media:3000',
+  )
+})
+
+test('contactsBase: strips path, query, and hash — only origin remains', () => {
+  const base = contactsBase('https://pugs-sales.vercel.app/api/import/imessage?foo=bar#baz')
+  assert.equal(base, 'https://pugs-sales.vercel.app')
+  assert.ok(!base.includes('?'), 'query string must not appear in the base URL')
+  assert.ok(!base.includes('#'), 'hash must not appear in the base URL')
+  assert.ok(!base.includes('/api'), '/api path must not appear in the base URL')
 })
