@@ -856,3 +856,81 @@ test('dispatchToLocalSender: request includes x-pugs-sync-secret auth header', a
     'sender requires the shared secret header — missing header causes 401 and silent outbound drop')
   assert.equal(capturedHeaders['x-pugs-sync-secret'], 'test-secret')
 })
+
+// ---------------------------------------------------------------------------
+// processBatch: journal-survivor guard
+//
+// The dedup guard's seenIds is pre-seeded from journalList() before the batch
+// loop runs. This protects against a specific double-send scenario:
+//
+//   1. Item X is dispatched (iMessage sent) and marked in the journal.
+//   2. reportOutcome exhausts retries without cloud confirmation (transient 5xx
+//      or timeout between the POST and a Vercel cold-start recovery).
+//   3. Journal still holds Item X. Next pollOnce() calls flushJournal(), which
+//      tries again — but if the cloud is still catching up, reportOutcome may
+//      fail again while fetchPendingBatch (a different endpoint / cold-start
+//      already recovered) SUCCEEDS and returns Item X as 'pending'.
+//   4. processBatch receives Item X. Without the journal-seed, seenIds is empty
+//      and Item X is dispatched a second time → double-send, a client-comms error.
+//
+// With the seed, Item X's id is already in seenIds when the loop starts, so it
+// is skipped regardless of how the cloud batch fetch went.
+// ---------------------------------------------------------------------------
+
+test('processBatch: journal-seed skips item whose id is already in the journal — prevents cloud re-delivery double-send', async () => {
+  const dispatched = []
+  const item = { id: 'live-1', to_handle: '+14155550100', body: 'Hello', attempts: 0 }
+
+  // Journal already holds this id (dispatched in a prior run, outcome not yet
+  // confirmed). Cloud re-delivered it as 'pending'. processBatch must NOT send.
+  await processBatch([item], deps({
+    dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
+    journalList: () => ['live-1'],
+  }))
+
+  assert.equal(dispatched.length, 0, 'journal-seeded id must be skipped — iMessage already sent in a prior run')
+})
+
+test('processBatch: journal-seed does not affect items with different ids', async () => {
+  const dispatched = []
+  const items = [
+    { id: 'new-a', to_handle: '+14155550100', body: 'A', attempts: 0 },
+    { id: 'new-b', to_handle: '+14155550200', body: 'B', attempts: 0 },
+  ]
+
+  // Journal holds a different id — must not block the new items.
+  await processBatch(items, deps({
+    dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
+    journalList: () => ['unrelated-id'],
+    reportOutcome: asyncNoop,
+  }))
+
+  assert.deepEqual(dispatched.sort(), ['new-a', 'new-b'], 'items not in the journal must dispatch normally')
+})
+
+test('processBatch: journal-seed coerces types — numeric journal id blocks string batch id', async () => {
+  // Coercion parity with the within-batch dedup: both sides are String()-coerced
+  // so numeric 42 in the journal and string "42" in the batch collapse to one slot.
+  const dispatched = []
+  const item = { id: '42', to_handle: '+14155550100', body: 'hi', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
+    journalList: () => [42],  // numeric 42 in journal
+  }))
+
+  assert.equal(dispatched.length, 0, 'numeric journal id 42 must block string batch id "42"')
+})
+
+test('processBatch: journal-seed is empty when journal is empty — no effect on normal flow', async () => {
+  const dispatched = []
+  const item = { id: 'fresh', to_handle: '+14155550100', body: 'hello', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
+    journalList: () => [],
+    reportOutcome: asyncNoop,
+  }))
+
+  assert.equal(dispatched.length, 1, 'empty journal must not block any dispatches')
+})
