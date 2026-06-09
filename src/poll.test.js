@@ -443,6 +443,48 @@ test('reportOutcome: exhausts retries on repeated network throws without throwin
   assert.equal(calls, 3)
 })
 
+// ── reportOutcome: return value — true = cloud confirmed, false = unconfirmed ─
+// reportOutcome returns true when the cloud acknowledges receipt (2xx or
+// permanent 4xx), and false when retries are exhausted without confirmation.
+// Callers use this to decide whether to clear the dispatch journal: only clear
+// after true, so the journal entry persists as a double-send guard until the
+// cloud is reachable again.
+
+test('reportOutcome: returns true on 200 OK', async () => {
+  const result = await reportOutcome('id-ok', { status: 'sent' }, {
+    _fetch: async () => ({ ok: true }),
+    _delay: noDelay,
+  })
+  assert.equal(result, true)
+})
+
+test('reportOutcome: returns true on 4xx — cloud considers the item handled', async () => {
+  // 404 = item already reaped; 401/403 = auth broken. In both cases retrying
+  // is pointless; treating as confirmed keeps the journal from accumulating
+  // unresolvable entries.
+  const result = await reportOutcome('id-404', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 404, text: async () => 'Not Found' }),
+    _delay: noDelay,
+  })
+  assert.equal(result, true)
+})
+
+test('reportOutcome: returns false after exhausted 5xx retries — cloud unconfirmed', async () => {
+  const result = await reportOutcome('id-5xx', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 503, text: async () => 'Service Unavailable' }),
+    _delay: noDelay,
+  })
+  assert.equal(result, false, 'unconfirmed: caller must not clear the journal entry')
+})
+
+test('reportOutcome: returns false after exhausted network-error retries — cloud unconfirmed', async () => {
+  const result = await reportOutcome('id-net', { status: 'sent' }, {
+    _fetch: async () => { throw new Error('ECONNREFUSED') },
+    _delay: noDelay,
+  })
+  assert.equal(result, false, 'unconfirmed: caller must not clear the journal entry')
+})
+
 // ---------------------------------------------------------------------------
 // loop() — graceful shutdown
 // ---------------------------------------------------------------------------
@@ -550,7 +592,7 @@ test('processBatch: marks journal after successful dispatch, before reportOutcom
 
   await processBatch([item], deps({
     dispatchToLocalSender: async () => { order.push('dispatch') },
-    reportOutcome:         async () => { order.push('report') },
+    reportOutcome:         async () => { order.push('report'); return true },
     journalMark:           (id)    => { order.push(`mark:${id}`) },
     journalClear:          (id)    => { order.push(`clear:${id}`) },
   }))
@@ -588,6 +630,23 @@ test('processBatch: does not mark journal for skip/fail/drop paths', async () =>
   assert.equal(marked.length, 0, 'journal must only be touched on the send path')
 })
 
+test('processBatch: does not clear journal when reportOutcome returns false (double-send guard)', async () => {
+  // If the cloud is unreachable and reportOutcome exhausts retries, the journal
+  // entry must NOT be cleared. The next cycle's flushJournal will re-try before
+  // fetching the batch — keeping the guard active until the cloud confirms receipt.
+  const cleared = []
+  const item = { id: 'j3', to_handle: '+14155550100', body: 'Hello', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: asyncNoop,
+    reportOutcome:         async () => false,
+    journalMark:           () => {},
+    journalClear:          (id) => { cleared.push(id) },
+  }))
+
+  assert.equal(cleared.length, 0, 'journal must not be cleared when outcome is unconfirmed')
+})
+
 // ---------------------------------------------------------------------------
 // dispatch journal integration — flushJournal
 // ---------------------------------------------------------------------------
@@ -597,7 +656,7 @@ test('flushJournal: reports each pending id as sent then clears it', async () =>
   const cleared  = []
 
   await flushJournal({
-    reportOutcome: async (id, payload) => { reported.push({ id, status: payload.status }) },
+    reportOutcome: async (id, payload) => { reported.push({ id, status: payload.status }); return true },
     journalList:   () => ['crash-1', 'crash-2'],
     journalClear:  (id) => { cleared.push(id) },
     log: noop,
@@ -621,16 +680,18 @@ test('flushJournal: is a no-op when journal is empty', async () => {
   assert.equal(called, false, 'reportOutcome must not be called when journal is empty')
 })
 
-test('flushJournal: clears each id even when reportOutcome swallows an error', async () => {
+test('flushJournal: does NOT clear entry when reportOutcome returns false (cloud unconfirmed)', async () => {
+  // If reportOutcome exhausts retries without cloud confirmation, the journal
+  // entry must stay so the next cycle's flushJournal can retry — this keeps
+  // the double-send guard active rather than silently giving up.
   const cleared = []
   await flushJournal({
-    // reportOutcome is already log-and-swallow in production, so simulate that
-    reportOutcome: async () => { /* swallowed */ },
+    reportOutcome: async () => false,  // simulates exhausted retries, cloud unreachable
     journalList:   () => ['item-x'],
     journalClear:  (id) => { cleared.push(id) },
     log: noop,
   })
-  assert.deepEqual(cleared, ['item-x'], 'journal entry must be cleared even when report is a no-op')
+  assert.deepEqual(cleared, [], 'journal must not be cleared when outcome is unconfirmed')
 })
 
 // ---------------------------------------------------------------------------

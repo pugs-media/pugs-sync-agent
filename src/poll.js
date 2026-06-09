@@ -116,11 +116,11 @@ async function reportOutcome(id, payload, {
         },
         body: JSON.stringify(payload),
       }, _timeoutMs, _fetch)
-      if (res.ok) return
+      if (res.ok) return true
       const errText = (await res.text()).slice(0, 200)
       if (res.status >= 400 && res.status < 500) {
         log(`report-outcome ${id} permanent error ${res.status} — not retrying: ${errText}`)
-        return
+        return true  // Cloud will not accept a retry; safe to clear the journal entry
       }
       if (attempt < MAX_REPORT_TRIES) { await _delay(500 * attempt); continue }
       log(`report-outcome ${id} failed after ${MAX_REPORT_TRIES} attempts: ${res.status} ${errText}`)
@@ -129,6 +129,7 @@ async function reportOutcome(id, payload, {
       log(`report-outcome ${id} network error after ${MAX_REPORT_TRIES} attempts: ${e.message || e}`)
     }
   }
+  return false  // Cloud did not confirm; caller must NOT clear the journal entry
 }
 
 async function dispatchToLocalSender(item, { _fetch = fetch, _timeoutMs = DISPATCH_TIMEOUT_MS } = {}) {
@@ -200,8 +201,12 @@ async function processBatch(items, {
       // reportOutcome is recoverable: flushJournal on the next startup will
       // re-report the outcome without re-sending the iMessage.
       journalMark(item.id)
-      await reportOutcome(item.id, { status: 'sent' })
-      journalClear(item.id)
+      const reported = await reportOutcome(item.id, { status: 'sent' })
+      // Only clear after cloud confirms receipt. If reportOutcome exhausts retries
+      // (cloud down), the entry stays; the next cycle's flushJournal retries before
+      // fetching the batch — preventing a double-send if the cloud re-delivers the
+      // item as pending before we can report it sent.
+      if (reported) journalClear(item.id)
       log(`sent ${item.id} → ${item.to_handle}`)
     } catch (e) {
       const msg = e?.message || String(e)
@@ -223,9 +228,13 @@ async function flushJournal({ reportOutcome, journalList, journalClear, log }) {
   if (pending.length === 0) return
   log(`flushing ${pending.length} unconfirmed dispatch(es) from prior crash`)
   for (const id of pending) {
-    await reportOutcome(id, { status: 'sent' })
-    journalClear(id)
-    log(`flushed dispatch journal for item ${id}`)
+    const reported = await reportOutcome(id, { status: 'sent' })
+    if (reported) {
+      journalClear(id)
+      log(`flushed dispatch journal for item ${id}`)
+    } else {
+      log(`could not confirm outcome for ${id} — journal entry kept, will retry on next cycle`)
+    }
   }
 }
 
