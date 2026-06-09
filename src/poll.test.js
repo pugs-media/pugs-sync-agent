@@ -179,6 +179,42 @@ test('reportOutcome: exhausts all retries and does not throw (log-and-swallow)',
   assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times')
 })
 
+test('reportOutcome: does not retry on 401 — permanent auth failure', async () => {
+  let calls = 0
+  await reportOutcome('id-5', { status: 'sent' }, {
+    _fetch: async () => { calls++; return { ok: false, status: 401, text: async () => 'Unauthorized' } },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 1, '401 must not trigger any retries')
+})
+
+test('reportOutcome: does not retry on 403 — permanent auth failure', async () => {
+  let calls = 0
+  await reportOutcome('id-6', { status: 'sent' }, {
+    _fetch: async () => { calls++; return { ok: false, status: 403, text: async () => 'Forbidden' } },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 1, '403 must not trigger any retries')
+})
+
+test('reportOutcome: does not retry on 404 — queue item already reaped', async () => {
+  let calls = 0
+  await reportOutcome('id-7', { status: 'sent' }, {
+    _fetch: async () => { calls++; return { ok: false, status: 404, text: async () => 'Not Found' } },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 1, '404 must not trigger any retries')
+})
+
+test('reportOutcome: does not invoke _delay on 4xx fast-fail', async () => {
+  let delayed = false
+  await reportOutcome('id-8', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' }),
+    _delay: async () => { delayed = true },
+  })
+  assert.equal(delayed, false, '_delay must not be called on permanent 4xx')
+})
+
 // ---------------------------------------------------------------------------
 // fetchPendingBatch
 // ---------------------------------------------------------------------------
