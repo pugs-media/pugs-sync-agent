@@ -217,16 +217,15 @@ async function syncContacts({ webhookBase, secret, scannerId = '', _fetch = fetc
     // Still POST an empty payload so the server-side heartbeat records
     // "agent is alive, found no AddressBook sources at the expected path"
     // — otherwise we have zero visibility on whether the agent ran at all.
+    // Use postContactsPayload (not a bare fetchWithTimeout) so this heartbeat
+    // gets the same 3-retry / exponential-backoff / 4xx-fast-fail contract
+    // every other HTTP call in the codebase has.
     try {
-      const resp = await fetchWithTimeout(`${webhookBase}/api/sync/contacts`, {
-        method:  'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-pugs-sync-secret': secret,
-          'x-pugs-scanner-id': scannerId,
-        },
-        body: JSON.stringify({ phones: [], emails: [], agent_note: 'no_address_books_found' }),
-      }, _timeoutMs, _fetch)
+      const resp = await postContactsPayload(
+        `${webhookBase}/api/sync/contacts`,
+        { phones: [], emails: [], agent_note: 'no_address_books_found' },
+        { _fetch, _delay, _timeoutMs, secret, scannerId },
+      )
       const text = await resp.text()
       return { ok: resp.ok, skipped: 'no_address_books_found', server_status: resp.status, server: text.slice(0, 200) }
     } catch (e) {
