@@ -162,7 +162,7 @@ async function dispatchToLocalSender(item, { _fetch = fetch, _timeoutMs = DISPAT
  * exercises every branch with injected deps instead of live network calls.
  *
  * @param {object[]} items
- * @param {{ reportOutcome, dispatchToLocalSender, maxAttempts, log, journalMark?, journalClear? }} deps
+ * @param {{ reportOutcome, dispatchToLocalSender, maxAttempts, log, journalMark?, journalClear?, journalList? }} deps
  */
 async function processBatch(items, {
   reportOutcome,
@@ -171,12 +171,18 @@ async function processBatch(items, {
   log,
   journalMark  = () => {},
   journalClear = () => {},
+  journalList  = () => [],
 }) {
-  // Dedup guard: the cloud must never return the same queue item twice in one
-  // batch, but a double-dispatch is a client-comms error we prevent here.
-  // Tracked as strings so numeric and string representations of the same id
-  // (e.g. 42 vs "42") collapse to a single slot.
-  const seenIds = new Set()
+  // Dedup guard: seenIds is pre-seeded with every ID currently in the dispatch
+  // journal (already dispatched but not yet cloud-confirmed). If flushJournal
+  // couldn't confirm an item this cycle and the cloud then re-delivers it in
+  // the batch, processing it again would cause a double-send — a client-comms
+  // error. The pre-seed prevents that without touching the happy path.
+  //
+  // Also catches within-batch duplicates: cloud must never return the same id
+  // twice in one fetch, but a cloud bug could. Tracked as strings so numeric
+  // and string forms of the same id (42 vs "42") collapse to one slot.
+  const seenIds = new Set(journalList().map(String))
 
   for (const item of items) {
     const plan = planItem(item, { maxAttempts })
@@ -189,7 +195,7 @@ async function processBatch(items, {
     // item.id is present here (drop is the only id-less path)
     const idKey = String(item.id)
     if (seenIds.has(idKey)) {
-      log(`dedup skip ${item.id}: already processed in this batch — cloud returned a duplicate item`)
+      log(`dedup skip ${item.id}: id already in journal or appeared twice in this batch — skipping to prevent double-send`)
       continue
     }
     seenIds.add(idKey)
@@ -278,6 +284,7 @@ async function pollOnce() {
     log,
     journalMark:  (id) => journal.mark(id),
     journalClear: (id) => journal.clear(id),
+    journalList:  () => journal.list(),
   })
 }
 
