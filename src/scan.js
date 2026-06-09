@@ -45,6 +45,7 @@ const MAX_WEBHOOK_POST_TRIES = 3
 const INITIAL_BACKFILL_DAYS = parseInt(process.env.INITIAL_BACKFILL_DAYS || '90', 10)
 const CONTACTS_SYNC_INTERVAL_MS = 60 * 60 * 1000  // once per hour (was 24h —
 // dropped while we get visibility into whether the sync is firing at all)
+const NEW_DRAFT_MIN_THROTTLE_MS = 60 * 1000   // min gap between new-draft-triggered contact syncs
 
 if (!WEBHOOK_URL || !SECRET) {
   console.error('Missing PUGS_SYNC_WEBHOOK_URL or PUGS_SYNC_SECRET in .env')
@@ -93,6 +94,33 @@ function parseNewDraftsCount(text) {
  */
 function contactsBase(webhookUrl) {
   return new URL(webhookUrl).origin
+}
+
+/**
+ * Decide whether to run a contacts sync this scanner tick.
+ * Pure — injectable `now` makes it unit-testable without real clocks.
+ *
+ * Returns { should: bool, trigger: string|null }.
+ *
+ * Two paths to true:
+ *  - new drafts were created AND >60s since last sync (immediate enrichment)
+ *  - >1h since last sync, regardless of new drafts (rename/rename catch-up)
+ *
+ * The hourly fallback is the correctness invariant: it must fire even on
+ * scanner runs that found zero new messages, so address-book renames stay
+ * current during quiet periods. Callers that return early before reaching
+ * this check break that invariant.
+ */
+function shouldSyncContacts(lastContactsAt, newDraftsThisRun, { now = Date.now() } = {}) {
+  const lastSync = lastContactsAt ? new Date(lastContactsAt).getTime() : 0
+  const sinceLastSync = now - lastSync
+  if (newDraftsThisRun > 0 && sinceLastSync > NEW_DRAFT_MIN_THROTTLE_MS) {
+    return { should: true, trigger: `${newDraftsThisRun} new draft(s)` }
+  }
+  if (sinceLastSync > CONTACTS_SYNC_INTERVAL_MS) {
+    return { should: true, trigger: 'hourly fallback' }
+  }
+  return { should: false, trigger: null }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -381,8 +409,9 @@ async function main() {
         console.error(`Heartbeat failed after retries: ${e.message}`)
         process.exit(4)
       }
-      return
-    }
+      // Fall through to contacts sync — the hourly cadence must fire even
+      // on quiet runs with no new messages so address-book renames stay current.
+    } else {
 
     // Row -> cloud payload mapping lives in ./payload.js (pure + unit-tested) so
     // the group_concat participant separator and sent_at/handle drop rules cannot
@@ -427,6 +456,7 @@ async function main() {
     const lastRowid = rows[rows.length - 1].rowid
     saveState(STATE_PATH, { ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
     console.log(`Advanced state to ROWID ${lastRowid}`)
+    } // end else (rows.length > 0)
   } finally {
     if (db) db.close()
     cleanupSnapshot(snapshotPath)
@@ -442,14 +472,10 @@ async function main() {
   //   - Otherwise fall back to the hourly cadence (handles renames in Connor's
   //     address book even when no new leads arrive).
   const latestState = loadState(STATE_PATH)
-  const lastContactsAt = latestState.last_contacts_at ? new Date(latestState.last_contacts_at).getTime() : 0
-  const sinceLastSync = Date.now() - lastContactsAt
-  const NEW_DRAFT_MIN_THROTTLE_MS = 60 * 1000  // 60s
-  const shouldRunForNewDrafts = newDraftsThisRun > 0 && sinceLastSync > NEW_DRAFT_MIN_THROTTLE_MS
-  const shouldRunForFallback = sinceLastSync > CONTACTS_SYNC_INTERVAL_MS
-  if (shouldRunForNewDrafts || shouldRunForFallback) {
-    const trigger = shouldRunForNewDrafts ? `${newDraftsThisRun} new draft(s)` : 'hourly fallback'
-    console.log(`Contacts sync trigger: ${trigger}`)
+  const { should: runContacts, trigger: contactsTrigger } =
+    shouldSyncContacts(latestState.last_contacts_at, newDraftsThisRun)
+  if (runContacts) {
+    console.log(`Contacts sync trigger: ${contactsTrigger}`)
     const webhookBase = contactsBase(WEBHOOK_URL)
     try {
       const res = await syncContacts({ webhookBase, secret: SECRET, scannerId: SCANNER_ID })
@@ -472,4 +498,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages, shouldSyncContacts }
