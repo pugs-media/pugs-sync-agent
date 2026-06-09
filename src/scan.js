@@ -264,6 +264,36 @@ async function fetchProspectHandles({
 }
 
 /**
+ * Validate that the expected chat.db tables and columns exist before querying.
+ * Throws with a clear, diagnosable message if a macOS upgrade has altered the
+ * schema — far better than a cryptic SQL error mid-scan or silent data loss.
+ * Called once per snapshot in main() before queryNewMessages.
+ *
+ * @param {import('better-sqlite3').Database} db  open snapshot DB
+ */
+function assertChatDbSchema(db) {
+  const required = {
+    message:           ['ROWID', 'guid', 'text', 'date', 'is_from_me', 'service', 'account', 'handle_id'],
+    handle:            ['ROWID', 'id'],
+    chat:              ['ROWID', 'guid', 'display_name'],
+    chat_message_join: ['chat_id', 'message_id'],
+    chat_handle_join:  ['chat_id', 'handle_id'],
+  }
+  for (const [table, cols] of Object.entries(required)) {
+    const info = db.prepare(`PRAGMA table_info(${table})`).all()
+    if (info.length === 0) {
+      throw new Error(`chat.db schema: table '${table}' not found — macOS may have changed the schema`)
+    }
+    const existing = new Set(info.map(r => r.name))
+    for (const col of cols) {
+      if (!existing.has(col)) {
+        throw new Error(`chat.db schema: column '${table}.${col}' not found (found: ${[...existing].join(', ')}) — macOS may have changed the schema`)
+      }
+    }
+  }
+}
+
+/**
  * Query new messages from a chat.db snapshot.
  *
  * Uses a first_chat CTE to deduplicate: a message appearing in multiple rows
@@ -374,6 +404,7 @@ async function main() {
   let db
   try {
     db = new Database(snapshotPath, { readonly: true })
+    assertChatDbSchema(db)
 
     if (cutoffRowid === 0 && INITIAL_BACKFILL_DAYS > 0) {
       const cutoffMs = Date.now() - INITIAL_BACKFILL_DAYS * 86400000
@@ -498,4 +529,4 @@ if (require.main === module) {
   })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, queryNewMessages, shouldSyncContacts }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, queryNewMessages, shouldSyncContacts }
