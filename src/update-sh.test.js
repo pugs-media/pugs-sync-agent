@@ -95,3 +95,24 @@ test('update.sh: successful reload shows clear success message', () => {
     'success message must come after the reload_failed guard'
   )
 })
+
+// ── git fetch timeout ────────────────────────────────────────────────────
+
+test('update.sh: git fetch is wrapped in timeout to prevent network hangs', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // git fetch must be protected by timeout so a hung SSH connection or slow
+  // remote does not stall the entire updater and block subsequent launchd cycles.
+  assert.ok(
+    src.includes('timeout 30 git fetch'),
+    'git fetch must be wrapped with timeout to prevent network stalls'
+  )
+})
+
+test('update.sh: git fetch timeout failure is logged', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // When timeout kills the fetch, the error message must be logged.
+  assert.ok(
+    src.includes('timeout') && src.includes('git fetch failed'),
+    'timeout kill of git fetch must be logged'
+  )
+})
