@@ -25,6 +25,7 @@ const path = require('path')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const { planItem } = require('./dispatch')
 const { fetchWithTimeout } = require('./fetch-timeout')
+const { reportHealth } = require('./health-report')
 const journal = require('./dispatch-journal')
 
 const WEBHOOK_URL      = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -272,9 +273,9 @@ async function pollOnce() {
     items = await fetchPendingBatch()
   } catch (e) {
     log('poll fetch error:', e.message || e)
-    return
+    return { itemCount: 0 }
   }
-  if (items.length === 0) return
+  if (items.length === 0) return { itemCount: 0 }
 
   log(`processing ${items.length} pending iMessage(s)`)
   await processBatch(items, {
@@ -286,6 +287,8 @@ async function pollOnce() {
     journalClear: (id) => journal.clear(id),
     journalList:  () => journal.list(),
   })
+
+  return { itemCount: items.length }
 }
 
 // Set by SIGTERM/SIGINT handlers so the loop finishes the current poll cycle
@@ -307,7 +310,17 @@ async function loop({
 } = {}) {
   // First tick immediately, then on interval.
   for (;;) {
-    await _pollOnce()
+    const startMs = Date.now()
+    try {
+      const result = await _pollOnce()
+      const durationMs = Date.now() - startMs
+      const itemCount = result?.itemCount || 0
+      reportHealth('poller', 'ok', { itemCount, durationMs })
+    } catch (e) {
+      const durationMs = Date.now() - startMs
+      log('poll cycle error (will retry):', e.message || e)
+      reportHealth('poller', 'error', { errorMessage: e.message, durationMs })
+    }
     if (_isShuttingDown()) return
     await _delay(POLL_INTERVAL_MS)
     if (_isShuttingDown()) return

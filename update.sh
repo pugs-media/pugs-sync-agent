@@ -126,6 +126,20 @@ echo "$LOG_PREFIX pulled $OLD_HEAD..$NEW_HEAD"
 if ! npm_out=$(npm install --loglevel error --no-audit --no-fund 2>&1); then
   echo "$LOG_PREFIX npm install failed — NOT reloading services, prior version still running"
   printf '%s\n' "$npm_out" | head -20 | sed "s|^|$LOG_PREFIX npm: |"
+  # Report the failure to the cloud
+  if [ -f "$AGENT_ROOT/.env" ]; then
+    # shellcheck disable=SC1091
+    . "$AGENT_ROOT/.env"
+    if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
+      BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+      curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
+        -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
+        -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
+        -H "content-type: application/json" \
+        -d '{"service":"updater","status":"error","error":"npm install failed"}' \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   exit 1
 fi
 
@@ -147,7 +161,38 @@ done
 
 if [ "$reload_failed" -eq 1 ]; then
   echo "$LOG_PREFIX service reload failed — update rolled back to previous version"
+  # Report the reload failure to the cloud
+  if [ -f "$AGENT_ROOT/.env" ]; then
+    # shellcheck disable=SC1091
+    . "$AGENT_ROOT/.env"
+    if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
+      BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+      curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
+        -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
+        -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
+        -H "content-type: application/json" \
+        -d '{"service":"updater","status":"error","error":"launchctl reload failed"}' \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   exit 1
 fi
 
 echo "$LOG_PREFIX services reloaded on $NEW_HEAD"
+
+# Report a successful update to the cloud health endpoint for observability
+if [ -f "$AGENT_ROOT/.env" ]; then
+  # shellcheck disable=SC1091
+  . "$AGENT_ROOT/.env"
+  if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
+    BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+    curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
+      -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
+      -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
+      -H "content-type: application/json" \
+      -d '{"service":"updater","status":"ok"}' \
+      >/dev/null 2>&1 \
+      && echo "$LOG_PREFIX health beacon sent to pugs-sales" \
+      || echo "$LOG_PREFIX health beacon failed (non-fatal)"
+  fi
+fi

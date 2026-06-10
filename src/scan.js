@@ -21,6 +21,7 @@ const { snapshotSqlite, cleanupSnapshot } = require('./snapshot')
 const { normalizeRows } = require('./payload')
 const { loadState, saveState } = require('./state')
 const { fetchWithTimeout } = require('./fetch-timeout')
+const { reportHealth } = require('./health-report')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
 const WEBHOOK_URL = process.env.PUGS_SYNC_WEBHOOK_URL
@@ -397,6 +398,7 @@ async function main() {
   const state = loadState(STATE_PATH)
   let cutoffRowid = state.last_rowid || 0
   let newDraftsThisRun = 0  // populated from /api/import/imessage response, used to trigger contacts sync
+  let messageCount = 0  // track messages sent for health reporting
 
   // On very first run, derive a cutoff from INITIAL_BACKFILL_DAYS to avoid
   // dumping years of history in one request.
@@ -498,6 +500,7 @@ async function main() {
     // names below. If parsing fails, fall back to hourly cadence — the
     // server-side response shape might evolve.
     newDraftsThisRun = parseNewDraftsCount(text)
+    messageCount = filteredPayload.length
 
     // Only advance state if the POST succeeded.
     // Track GUIDs of sent messages so we can dedup on ROWID reset.
@@ -542,13 +545,25 @@ async function main() {
       console.error('Contacts sync failed (non-fatal):', e.message || e)
     }
   }
+
+  return { messageCount }
 }
 
 if (require.main === module) {
-  main().catch(e => {
-    console.error('Scan failed:', e)
-    process.exit(1)
-  })
+  const startMs = Date.now()
+  main()
+    .then(result => {
+      const durationMs = Date.now() - startMs
+      // result may be undefined or { messageCount } depending on the main() flow
+      const messageCount = result?.messageCount || 0
+      reportHealth('scanner', 'ok', { itemCount: messageCount, durationMs })
+    })
+    .catch(e => {
+      const durationMs = Date.now() - startMs
+      console.error('Scan failed:', e)
+      reportHealth('scanner', 'error', { errorMessage: e.message, durationMs })
+      process.exit(1)
+    })
 }
 
 module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, queryNewMessages, shouldSyncContacts }
