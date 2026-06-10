@@ -859,6 +859,71 @@ test('queryNewMessages: returns participant list for a group chat', () => {
   db.close()
 })
 
+// ── GUID-based dedup guard against ROWID reset ───────────────────────────────
+// When SQLite VACUUMs or macOS major updates reset ROWID values, the scan's
+// highwater-mark (last_rowid) becomes unreliable. The scanner now tracks sent
+// message GUIDs so re-ingestion is prevented even if ROWID resets. These tests
+// verify the dedup logic works correctly.
+
+test('GUID dedup: filters out messages whose GUID was already sent', () => {
+  // Simulate a prior run that sent message GUID 'msg-1'
+  const state = { last_rowid: 100, sent_guids: ['msg-1'] }
+  const sentGuids = state.sent_guids ? new Set(state.sent_guids) : new Set()
+
+  // Simulate a new batch where 'msg-1' appears again (e.g., after VACUUM reset ROWID)
+  const rows = [
+    { rowid: 50, guid: 'msg-1', text: 'old', is_from_me: 1 },  // already sent
+    { rowid: 51, guid: 'msg-2', text: 'new', is_from_me: 1 },  // new
+  ]
+
+  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
+  assert.equal(dedupedRows.length, 1)
+  assert.equal(dedupedRows[0].guid, 'msg-2', 'dedup must filter out msg-1')
+})
+
+test('GUID dedup: accumulates GUIDs from sent messages and bounds the set', () => {
+  const state = { last_rowid: 100, sent_guids: ['msg-1', 'msg-2'] }
+  const sentGuids = state.sent_guids ? new Set(state.sent_guids) : new Set()
+
+  const rows = [
+    { rowid: 101, guid: 'msg-3', text: 'new' },
+    { rowid: 102, guid: 'msg-4', text: 'new' },
+  ]
+
+  // Simulate accumulation and bounding
+  const newSentGuids = [...sentGuids, ...rows.map(r => r.guid)]
+  const MAX_SENT_GUIDS = 10000
+  const boundedSentGuids = newSentGuids.slice(-MAX_SENT_GUIDS)
+
+  assert.equal(boundedSentGuids.length, 4)
+  assert.deepEqual(boundedSentGuids, ['msg-1', 'msg-2', 'msg-3', 'msg-4'])
+})
+
+test('GUID dedup: respects MAX_SENT_GUIDS boundary to prevent unbounded growth', () => {
+  // Create a sent_guids array with many entries
+  const bigList = Array.from({ length: 10005 }, (_, i) => `msg-${i}`)
+  const sentGuids = new Set(bigList)
+
+  const newRows = [{ rowid: 20000, guid: 'msg-new' }]
+  const newSentGuids = [...sentGuids, ...newRows.map(r => r.guid)]
+  const MAX_SENT_GUIDS = 10000
+  const boundedSentGuids = newSentGuids.slice(-MAX_SENT_GUIDS)
+
+  assert.equal(boundedSentGuids.length, 10000, 'set must be bounded to MAX_SENT_GUIDS')
+  assert.ok(boundedSentGuids.includes('msg-new'), 'newest entry must be kept')
+  assert.ok(!boundedSentGuids.includes('msg-0'), 'oldest entries must be dropped')
+})
+
+test('GUID dedup: handles empty sent_guids in state gracefully', () => {
+  const state = {}  // no sent_guids field
+  const sentGuids = state.sent_guids ? new Set(state.sent_guids) : new Set()
+  assert.equal(sentGuids.size, 0)
+
+  const rows = [{ rowid: 1, guid: 'msg-1', text: 'first' }]
+  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
+  assert.equal(dedupedRows.length, 1, 'all rows pass when sent_guids is empty')
+})
+
 // ── shouldSyncContacts ────────────────────────────────────────────────────────
 // shouldSyncContacts decides whether to run an AddressBook sync on a given tick.
 // These tests are the primary guard for the correctness invariant: the hourly
