@@ -557,8 +557,19 @@ async function main() {
     const newSentGuids = [...sentGuids, ...guidsToAdd]
     const MAX_SENT_GUIDS = 10000
     const boundedSentGuids = newSentGuids.slice(-MAX_SENT_GUIDS)
-    saveState(STATE_PATH, { ...state, last_rowid: lastRowid, sent_guids: boundedSentGuids, last_run_at: new Date().toISOString() })
-    console.log(`Advanced state to ROWID ${lastRowid}, tracked ${boundedSentGuids.length} sent GUIDs`)
+    try {
+      saveState(STATE_PATH, { ...state, last_rowid: lastRowid, sent_guids: boundedSentGuids, last_run_at: new Date().toISOString() })
+      console.log(`Advanced state to ROWID ${lastRowid}, tracked ${boundedSentGuids.length} sent GUIDs`)
+    } catch (e) {
+      // State persist failed (disk full, permissions, etc). A duplicate send is
+      // safer than halting: the next scan will re-ingest the same messages but
+      // the GUID dedup guard will prevent double-POST to pugs-sales. However,
+      // this is a serious condition — report it so Charlie can investigate.
+      const msg = `State save failed after webhook POST — risk of duplicate send on next scan: ${e.message}`
+      console.error(msg)
+      await reportHealth('scanner', 'error', { errorMessage: msg })
+      process.exit(3)
+    }
     } // end else (rows.length > 0)
   } finally {
     if (db) db.close()
