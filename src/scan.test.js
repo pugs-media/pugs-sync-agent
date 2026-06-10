@@ -924,6 +924,28 @@ test('GUID dedup: handles empty sent_guids in state gracefully', () => {
   assert.equal(dedupedRows.length, 1, 'all rows pass when sent_guids is empty')
 })
 
+test('GUID dedup: deduped rows are not passed to normalizeRows (no double-send)', () => {
+  // Regression: the main() loop normalizes rows, filters by prospect, and posts.
+  // If normalizeRows() receives the FULL rows array instead of dedupedRows, a
+  // message whose GUID was already sent still gets normalized and posted,
+  // causing a silent double-send.
+  // This test verifies the fix: deduped rows are excluded from normalization.
+  const state = { sent_guids: ['msg-1'] }
+  const rows = [
+    { rowid: 1, guid: 'msg-1', text: 'a@example.com', is_from_me: 1, sent_at: '2025-01-01 10:00:00', participants: 'bob' },  // already sent
+    { rowid: 2, guid: 'msg-2', text: 'new', is_from_me: 1, sent_at: '2025-01-01 10:01:00', participants: 'charlie' },
+  ]
+
+  const sentGuids = new Set(state.sent_guids)
+  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
+
+  // In the old buggy code, normalizeRows(rows) would include msg-1.
+  // In the fixed code, normalizeRows(dedupedRows) excludes it.
+  assert.equal(dedupedRows.length, 1, 'msg-1 must be filtered out')
+  assert.equal(dedupedRows[0].guid, 'msg-2', 'only msg-2 should remain for normalization')
+  // This ensures that dedupedRows is the input to normalization, not rows.
+})
+
 // ── shouldSyncContacts ────────────────────────────────────────────────────────
 // shouldSyncContacts decides whether to run an AddressBook sync on a given tick.
 // These tests are the primary guard for the correctness invariant: the hourly

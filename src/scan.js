@@ -459,10 +459,10 @@ async function main() {
     // Row -> cloud payload mapping lives in ./payload.js (pure + unit-tested) so
     // the group_concat participant separator and sent_at/handle drop rules cannot
     // silently regress. Drops rows with no usable timestamp or sender handle.
-    const payload = normalizeRows(rows)
-    const droppedByNormalize = rows.length - payload.length
+    const payload = normalizeRows(dedupedRows)
+    const droppedByNormalize = dedupedRows.length - payload.length
     if (droppedByNormalize > 0) {
-      console.log(`Dropped ${droppedByNormalize}/${rows.length} rows during normalization (corrupt timestamp or missing sender handle)`)
+      console.log(`Dropped ${droppedByNormalize}/${dedupedRows.length} rows during normalization (corrupt timestamp or missing sender handle)`)
     }
 
     // Prospect intersect — drop inbound rows whose sender handle isn't in
