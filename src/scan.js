@@ -597,7 +597,15 @@ async function main() {
       // Only advance the cadence on actual success — keep retrying if the
       // post failed or the AddressBook wasn't readable.
       if (res?.ok) {
-        saveState(STATE_PATH, { ...latestState, last_contacts_at: new Date().toISOString() })
+        try {
+          saveState(STATE_PATH, { ...latestState, last_contacts_at: new Date().toISOString() })
+        } catch (e) {
+          // State persist failed (disk full, permissions, etc). Non-fatal: contacts sync will run
+          // again on the next scan. Log it and report so Charlie can monitor.
+          const msg = `Contacts state save failed: ${e.message}`
+          console.warn(msg)
+          await reportHealth('scanner', 'error', { errorMessage: msg })
+        }
       } else {
         // POST failed or returned error — report to cloud health so Charlie can monitor
         const reason = res?.error || 'unknown failure'
