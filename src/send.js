@@ -101,7 +101,17 @@ if (require.main === module) {
   })
 
   const app = createApp()
-  app.listen(PORT, '127.0.0.1', () => {
+  const server = app.listen(PORT, '127.0.0.1', () => {
     console.log(`Pugs sender listening on http://127.0.0.1:${PORT}`)
+  })
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`FATAL: cannot bind to http://127.0.0.1:${PORT} — port already in use (another sender process running?)`)
+    } else if (err.code === 'EACCES') {
+      console.error(`FATAL: cannot bind to http://127.0.0.1:${PORT} — permission denied`)
+    } else {
+      console.error(`FATAL: listen error on http://127.0.0.1:${PORT}: ${err.code} ${err.message}`)
+    }
+    process.exit(3)
   })
 }
