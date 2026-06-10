@@ -71,13 +71,16 @@ function withLock(fn, lockPath = LOCK_PATH) {
 }
 
 function mark(id, { journalPath = DEFAULT_PATH } = {}) {
+  let failed = false
   withLock(() => {
     try {
       fs.appendFileSync(journalPath, JSON.stringify({ id }) + '\n')
     } catch (e) {
       console.error('dispatch-journal mark error (best-effort, continuing):', e.message)
+      failed = true
     }
   })
+  return !failed
 }
 
 function clear(id, { journalPath = DEFAULT_PATH } = {}) {

@@ -19,6 +19,9 @@ function deps(overrides = {}) {
     dispatchToLocalSender: asyncNoop,
     maxAttempts: MAX,
     log: noop,
+    journalMark: () => true,  // Default: mark succeeds
+    journalClear: noop,
+    journalList: () => [],
     ...overrides,
   }
 }
@@ -593,7 +596,7 @@ test('processBatch: marks journal after successful dispatch, before reportOutcom
   await processBatch([item], deps({
     dispatchToLocalSender: async () => { order.push('dispatch') },
     reportOutcome:         async () => { order.push('report'); return true },
-    journalMark:           (id)    => { order.push(`mark:${id}`) },
+    journalMark:           (id)    => { order.push(`mark:${id}`); return true },
     journalClear:          (id)    => { order.push(`clear:${id}`) },
   }))
 
@@ -716,7 +719,7 @@ test('processBatch: dedup — second occurrence of same id is skipped, not dispa
   await processBatch(items, deps({
     dispatchToLocalSender: async (item) => { dispatched.push(item.id) },
     reportOutcome:         async (id, payload) => { reported.push({ id, status: payload.status }); return true },
-    journalMark:           () => {},
+    journalMark:           () => true,
     journalClear:          () => {},
   }))
 
@@ -739,7 +742,7 @@ test('processBatch: dedup — first occurrence dispatches normally, second is a 
   await processBatch(items, deps({
     dispatchToLocalSender: async () => { order.push('dispatch') },
     reportOutcome:         async () => { order.push('report'); return true },
-    journalMark:           ()     => { order.push('mark') },
+    journalMark:           ()     => { order.push('mark'); return true },
     journalClear:          ()     => { order.push('clear') },
   }))
 
@@ -933,4 +936,27 @@ test('processBatch: journal-seed is empty when journal is empty — no effect on
   }))
 
   assert.equal(dispatched.length, 1, 'empty journal must not block any dispatches')
+})
+
+// ---------------------------------------------------------------------------
+// journal mark failure safety
+// ---------------------------------------------------------------------------
+
+test('processBatch: journal mark failure is caught and reported as failed (prevents double-send)', async () => {
+  const reported = []
+  const dispatched = []
+  const item = { id: 'journal-fail', to_handle: '+14155550100', body: 'hello', attempts: 0 }
+
+  await processBatch([item], deps({
+    dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
+    journalMark: () => false, // Simulate mark failure (disk full, permissions, etc.)
+    reportOutcome: async (id, payload) => { reported.push({ id, payload }) },
+  }))
+
+  // Item was dispatched (we can't prevent that after sender returns)
+  assert.equal(dispatched.length, 1, 'sender was called')
+  // But mark failure was caught and reported as failed
+  assert.equal(reported.length, 1, 'failure must be reported to cloud')
+  assert.equal(reported[0].payload.status, 'failed', 'must report as failed')
+  assert.ok(reported[0].payload.error.includes('journal mark failed'), 'error must mention journal failure')
 })

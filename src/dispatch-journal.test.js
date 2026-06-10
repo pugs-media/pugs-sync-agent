@@ -20,7 +20,8 @@ test('list: returns empty array when file does not exist', () => {
 
 test('mark: creates file with one entry, list returns that id', () => {
   const journalPath = tmpPath()
-  mark('abc', { journalPath })
+  const ok = mark('abc', { journalPath })
+  assert.equal(ok, true, 'mark should return true on success')
   assert.deepEqual(list({ journalPath }), ['abc'])
   fs.unlinkSync(journalPath)
 })
@@ -114,4 +115,11 @@ test('clear: does not drop entries marked during the clear read-write window (ra
   const result = list({ journalPath })
   assert.deepEqual(result, ['item-2', 'item-3'], 'item-3 must not be lost even if marked during clear')
   fs.unlinkSync(journalPath)
+})
+
+test('mark: returns false when write fails (e.g. bad path)', () => {
+  // Use a path that cannot be written to (parent directory doesn't exist).
+  const badPath = '/nonexistent-parent-dir-12345/journal.ndjson'
+  const ok = mark('test-id', { journalPath: badPath })
+  assert.equal(ok, false, 'mark should return false on write failure')
 })
