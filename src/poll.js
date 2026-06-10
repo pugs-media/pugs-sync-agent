@@ -222,7 +222,12 @@ async function processBatch(items, {
       // Mark the journal BEFORE reporting so a crash between dispatch and
       // reportOutcome is recoverable: flushJournal on the next startup will
       // re-report the outcome without re-sending the iMessage.
-      journalMark(item.id)
+      // If journal mark fails (disk full, permissions), it's a fatal error —
+      // we cannot safely track the dispatch and must not proceed.
+      const markOk = journalMark(item.id)
+      if (!markOk) {
+        throw new Error('journal mark failed — cannot safely track dispatch (disk full? permissions?)')
+      }
       const reported = await reportOutcome(item.id, { status: 'sent' })
       // Only clear after cloud confirms receipt. If reportOutcome exhausts retries
       // (cloud down), the entry stays; the next cycle's flushJournal retries before
