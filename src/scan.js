@@ -540,9 +540,15 @@ async function main() {
       // post failed or the AddressBook wasn't readable.
       if (res?.ok) {
         saveState(STATE_PATH, { ...latestState, last_contacts_at: new Date().toISOString() })
+      } else {
+        // POST failed or returned error — report to cloud health so Charlie can monitor
+        const reason = res?.error || 'unknown failure'
+        await reportHealth('scanner', 'error', { errorMessage: `contacts sync failed: ${reason}` })
       }
     } catch (e) {
       console.error('Contacts sync failed (non-fatal):', e.message || e)
+      // Surface sync errors to the cloud health endpoint so stalled enrichment is visible
+      await reportHealth('scanner', 'error', { errorMessage: `contacts sync threw: ${e.message || String(e)}` })
     }
   }
 

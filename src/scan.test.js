@@ -1182,3 +1182,32 @@ test('normalizeRows: drops rows with corrupt timestamps visible in logs', () => 
   assert.equal(payload.length, 2, 'should have 2 valid rows after normalization')
   assert.equal(rows.length - payload.length, 1, 'should show 1 row was dropped')
 })
+
+// ── contacts sync error health reporting ────────────────────────────────────
+// When contacts sync fails (network error or bad response), the error should be
+// reported to the cloud health endpoint so Charlie can monitor enrichment status.
+// This prevents silent degradation: if contacts sync breaks, outbound enrichment
+// stalls without visible monitoring.
+
+test('shouldSyncContacts: triggers on new drafts with 60s throttle', () => {
+  const now = 1700000000000
+  const result = shouldSyncContacts(null, 3, { now })
+  assert.equal(result.should, true, 'new drafts should trigger sync')
+  assert.ok(result.trigger.includes('new draft'), 'trigger reason should mention drafts')
+})
+
+test('shouldSyncContacts: triggers on hourly fallback even with no new drafts', () => {
+  const now = 1700000000000
+  const lastSync = new Date(now - 61 * 60 * 1000).toISOString()
+  const result = shouldSyncContacts(lastSync, 0, { now })
+  assert.equal(result.should, true, 'hourly fallback should trigger')
+  assert.equal(result.trigger, 'hourly fallback')
+})
+
+test('shouldSyncContacts: skips if <60s since last sync and no new drafts', () => {
+  const now = 1700000000000
+  const lastSync = new Date(now - 30 * 1000).toISOString()
+  const result = shouldSyncContacts(lastSync, 0, { now })
+  assert.equal(result.should, false, 'should not trigger when too recent and no new drafts')
+  assert.equal(result.trigger, null)
+})
