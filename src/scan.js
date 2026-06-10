@@ -449,6 +449,10 @@ async function main() {
     // the group_concat participant separator and sent_at/handle drop rules cannot
     // silently regress. Drops rows with no usable timestamp or sender handle.
     const payload = normalizeRows(rows)
+    const droppedByNormalize = rows.length - payload.length
+    if (droppedByNormalize > 0) {
+      console.log(`Dropped ${droppedByNormalize}/${rows.length} rows during normalization (corrupt timestamp or missing sender handle)`)
+    }
 
     // Prospect intersect — drop inbound rows whose sender handle isn't in
     // the allowlist. Outbound (is_from_me=1) passes if (a) the row's
