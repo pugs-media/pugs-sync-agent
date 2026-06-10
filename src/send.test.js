@@ -60,6 +60,39 @@ function defaultDeps(overrides = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Server startup / listen errors
+// ---------------------------------------------------------------------------
+
+test('server listen: handles EADDRINUSE (port already in use)', async () => {
+  // Start server 1 on a random port
+  const app1 = createApp({ secret: TEST_SECRET, ...defaultDeps() })
+  const server1 = app1.listen(0, '127.0.0.1')
+  await new Promise(resolve => server1.once('listening', resolve))
+
+  // Try to start server 2 on the same port
+  const app2 = createApp({ secret: TEST_SECRET, ...defaultDeps() })
+  const { port } = server1.address()
+  const server2 = app2.listen(port, '127.0.0.1')
+
+  let errorEmitted = false
+  let errorMessage = ''
+  server2.on('error', (err) => {
+    errorEmitted = true
+    errorMessage = err.message
+  })
+
+  // Give the server a moment to emit the error
+  await new Promise(resolve => setTimeout(resolve, 100))
+
+  // Clean up
+  await new Promise(resolve => server1.close(resolve))
+  await new Promise(resolve => { server2.close(resolve); server2.removeAllListeners('error') })
+
+  assert.equal(errorEmitted, true, 'server must emit error event on EADDRINUSE')
+  assert.match(errorMessage, /EADDRINUSE|already in use/, 'error message should indicate port conflict')
+})
+
+// ---------------------------------------------------------------------------
 // /health
 // ---------------------------------------------------------------------------
 
