@@ -84,7 +84,24 @@ if (require.main === module) {
     console.error('Missing PUGS_SYNC_SECRET in .env')
     process.exit(2)
   }
-  createApp().listen(PORT, '127.0.0.1', () => {
+
+  // Catch unhandled exceptions so they're logged before the process exits.
+  // launchd will restart the sender, but without this, crashes would appear
+  // only in sender.error.log — easy to miss in triage.
+  process.on('uncaughtException', (err) => {
+    console.error('FATAL: uncaught exception:', err.message)
+    console.error(err.stack)
+    process.exit(1)
+  })
+
+  // Catch unhandled promise rejections so they don't silently fail.
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('FATAL: unhandled rejection:', reason)
+    process.exit(1)
+  })
+
+  const app = createApp()
+  app.listen(PORT, '127.0.0.1', () => {
     console.log(`Pugs sender listening on http://127.0.0.1:${PORT}`)
   })
 }
