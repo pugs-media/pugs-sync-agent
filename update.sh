@@ -143,15 +143,32 @@ if ! npm_out=$(npm install --loglevel error --no-audit --no-fund 2>&1); then
   exit 1
 fi
 
-# Reload the three runtime services. Updater itself doesn't reload itself
-# (launchd will pick up plist changes on the next StartInterval tick).
-# If any service fails to reload, the entire update is treated as failed
-# (exit 1) so update.log shows a clear error and the watchdog can alert.
-reload_failed=0
-for kind in scanner sender poller; do
+# Reload the three runtime services atomically. Updater itself doesn't reload
+# itself (launchd will pick up plist changes on the next StartInterval tick).
+#
+# For safety, we unload all three first, then attempt to load all three from
+# the new code. If ANY load fails, we immediately rollback by loading all three
+# from the OLD_HEAD (by resetting to OLD_HEAD, reinstalling, and reloading).
+# This ensures the Mac is never left with a mix of old and new code.
+#
+# If the rollback also fails, the Mac is in a broken state — report it to
+# pugs-sales so Charlie knows to manually intervene.
+
+SERVICES=(scanner sender poller)
+
+# Step 1: Unload all services
+for kind in "${SERVICES[@]}"; do
   dst="$LAUNCH_DIR/com.pugs.syncagent.$kind.plist"
   if [ -f "$dst" ]; then
     launchctl unload "$dst" 2>/dev/null
+  fi
+done
+
+# Step 2: Attempt to load all services from the new code
+reload_failed=0
+for kind in "${SERVICES[@]}"; do
+  dst="$LAUNCH_DIR/com.pugs.syncagent.$kind.plist"
+  if [ -f "$dst" ]; then
     if ! launchctl load "$dst" 2>&1; then
       echo "$LOG_PREFIX launchctl load $kind failed"
       reload_failed=1
@@ -160,8 +177,33 @@ for kind in scanner sender poller; do
 done
 
 if [ "$reload_failed" -eq 1 ]; then
-  echo "$LOG_PREFIX service reload failed — update rolled back to previous version"
-  # Report the reload failure to the cloud
+  echo "$LOG_PREFIX service reload failed — ROLLING BACK to previous version $OLD_HEAD"
+
+  # Attempt rollback: reset code, reinstall deps, reload services
+  if ! git reset --hard "$OLD_HEAD" 2>&1 >/dev/null; then
+    echo "$LOG_PREFIX ROLLBACK FAILED: git reset --hard $OLD_HEAD failed — Mac is in broken state"
+    echo "$LOG_PREFIX ROLLBACK FAILED: manual intervention required"
+  elif ! npm install --loglevel error --no-audit --no-fund 2>&1 >/dev/null; then
+    echo "$LOG_PREFIX ROLLBACK FAILED: npm install failed on rollback — Mac is in broken state"
+    echo "$LOG_PREFIX ROLLBACK FAILED: manual intervention required"
+  else
+    # Attempt to reload the old services
+    rollback_ok=1
+    for kind in "${SERVICES[@]}"; do
+      dst="$LAUNCH_DIR/com.pugs.syncagent.$kind.plist"
+      if [ -f "$dst" ]; then
+        if ! launchctl load "$dst" 2>&1; then
+          echo "$LOG_PREFIX ROLLBACK FAILED: launchctl load $kind failed — Mac is in broken state"
+          rollback_ok=0
+        fi
+      fi
+    done
+    if [ "$rollback_ok" -eq 1 ]; then
+      echo "$LOG_PREFIX ROLLBACK SUCCESS: services reloaded on $OLD_HEAD"
+    fi
+  fi
+
+  # Report the reload+rollback failure to the cloud
   if [ -f "$AGENT_ROOT/.env" ]; then
     # shellcheck disable=SC1091
     . "$AGENT_ROOT/.env"
@@ -171,7 +213,7 @@ if [ "$reload_failed" -eq 1 ]; then
         -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
         -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
         -H "content-type: application/json" \
-        -d '{"service":"updater","status":"error","error":"launchctl reload failed"}' \
+        -d '{"service":"updater","status":"error","error":"service reload failed, attempted rollback"}' \
         >/dev/null 2>&1 || true
     fi
   fi

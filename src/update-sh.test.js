@@ -95,3 +95,40 @@ test('update.sh: successful reload shows clear success message', () => {
     'success message must come after the reload_failed guard'
   )
 })
+
+test('update.sh: reload is atomic — all unload before any load', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // For atomicity, all three services must be unloaded BEFORE any are loaded.
+  // This prevents a partially-updated state if a load fails mid-way.
+  const firstUnloadIndex = src.indexOf('launchctl unload')
+  const firstLoadIndex = src.indexOf('launchctl load "$dst"', firstUnloadIndex)
+  const lastUnloadIndex = src.lastIndexOf('launchctl unload')
+  assert.ok(
+    lastUnloadIndex < firstLoadIndex,
+    'all launchctl unload calls must come before any launchctl load calls'
+  )
+})
+
+test('update.sh: reload failure triggers rollback to OLD_HEAD', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // If any service fails to load, the script must rollback by:
+  // 1. git reset --hard $OLD_HEAD
+  // 2. npm install
+  // 3. launchctl load all services from old code
+  assert.ok(
+    src.includes('git reset --hard "$OLD_HEAD"'),
+    'rollback must reset code to OLD_HEAD'
+  )
+  assert.ok(
+    src.includes('ROLLBACK FAILED') || src.includes('ROLLBACK SUCCESS'),
+    'rollback outcome must be logged clearly'
+  )
+  // Verify rollback happens inside the reload_failed guard
+  const reloadFailedGuardStart = src.indexOf('if [ "$reload_failed" -eq 1 ]')
+  const resetStart = src.indexOf('git reset --hard "$OLD_HEAD"')
+  const reloadFailedGuardEnd = src.indexOf('exit 1', reloadFailedGuardStart)
+  assert.ok(
+    reloadFailedGuardStart < resetStart && resetStart < reloadFailedGuardEnd,
+    'rollback must occur inside the reload_failed guard'
+  )
+})
