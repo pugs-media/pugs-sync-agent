@@ -234,3 +234,40 @@ test('POST /send: execFile is called with killSignal SIGKILL so a hung osascript
       'osascript must be hard-killed on timeout to prevent orphaned processes sending duplicate iMessages')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Error logging (health reporting is integration-tested via integration tests,
+// unit tests verify that errors are logged and surfaced to the response)
+// ---------------------------------------------------------------------------
+
+test('POST /send: validation errors log to console', async () => {
+  let loggedErrors = []
+  const originalError = console.error
+  console.error = (...args) => { loggedErrors.push(args.join(' ')) }
+
+  try {
+    await withServer(defaultDeps(), async server => {
+      const res = await httpRequest(server, { body: { to: '+1415' } })
+      assert.equal(res.status, 400)
+      assert.ok(loggedErrors.some(log => log.includes('validation')), 'validation errors should be logged')
+    })
+  } finally {
+    console.error = originalError
+  }
+})
+
+test('POST /send: osascript errors log to console', async () => {
+  let loggedErrors = []
+  const originalError = console.error
+  console.error = (...args) => { loggedErrors.push(args.join(' ')) }
+
+  try {
+    await withServer(defaultDeps({ execFile: errExecFile }), async server => {
+      const res = await httpRequest(server, { body: { to: '+1415', text: 'hi' } })
+      assert.equal(res.status, 500)
+      assert.ok(loggedErrors.some(log => log.includes('osascript')), 'osascript errors should be logged')
+    })
+  } finally {
+    console.error = originalError
+  }
+})

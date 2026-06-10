@@ -17,6 +17,7 @@ const { execFile: defaultExecFile } = require('child_process')
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 const express = require('express')
 const { buildSendScript: defaultBuildScript, parseOsascriptResult: defaultParseResult } = require('./applescript')
+const { reportHealth } = require('./health-report')
 
 const PORT   = parseInt(process.env.SENDER_PORT || '7890', 10)
 const SECRET = process.env.PUGS_SYNC_SECRET
@@ -50,10 +51,19 @@ function createApp({
   app.get('/health', (_req, res) => res.json({ ok: true, port: PORT }))
 
   app.post('/send', (req, res) => {
+    const startMs = Date.now()
     const { to, text, service } = req.body || {}
-    if (!to || !text) return res.status(400).json({ error: 'to and text required' })
+    if (!to || !text) {
+      const errMsg = 'to and text required'
+      console.error('send validation failed:', errMsg)
+      reportHealth('sender', 'error', { errorMessage: errMsg }).catch(() => {})
+      return res.status(400).json({ error: errMsg })
+    }
     if (typeof to !== 'string' || typeof text !== 'string') {
-      return res.status(400).json({ error: 'to/text must be strings' })
+      const errMsg = 'to/text must be strings'
+      console.error('send validation failed:', errMsg)
+      reportHealth('sender', 'error', { errorMessage: errMsg }).catch(() => {})
+      return res.status(400).json({ error: errMsg })
     }
     // Build the AppleScript with escaped handle/body so a quote, backslash, or
     // newline in either can't break out of the string literal (see applescript.js).
@@ -61,15 +71,20 @@ function createApp({
     const script = buildSendScript({ to, text, service: svc })
 
     execFile('osascript', ['-e', script], { timeout: 15000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      const durationMs = Date.now() - startMs
       if (err) {
-        console.error('osascript process error:', stderr || err.message)
-        return res.status(500).json({ error: 'send failed', detail: (stderr || err.message).slice(0, 400) })
+        const errMsg = stderr || err.message
+        console.error('osascript process error:', errMsg)
+        reportHealth('sender', 'error', { errorMessage: `osascript failed: ${errMsg.slice(0, 200)}`, durationMs }).catch(() => {})
+        return res.status(500).json({ error: 'send failed', detail: errMsg.slice(0, 400) })
       }
       const parsed = parseOsascriptResult(stdout)
       if (!parsed.ok) {
         console.error('osascript reported send failure:', parsed.detail)
+        reportHealth('sender', 'error', { errorMessage: `send failed: ${parsed.detail}`, durationMs }).catch(() => {})
         return res.status(500).json({ error: 'send failed', detail: parsed.detail })
       }
+      reportHealth('sender', 'ok', { durationMs }).catch(() => {})
       res.json({ ok: true, to, service: svc })
     })
   })
@@ -89,19 +104,30 @@ if (require.main === module) {
   // launchd will restart the sender, but without this, crashes would appear
   // only in sender.error.log — easy to miss in triage.
   process.on('uncaughtException', (err) => {
-    console.error('FATAL: uncaught exception:', err.message)
+    const msg = `FATAL: uncaught exception: ${err.message}`
+    console.error(msg)
     console.error(err.stack)
+    reportHealth('sender', 'error', { errorMessage: msg }).catch(() => {})
     process.exit(1)
   })
 
   // Catch unhandled promise rejections so they don't silently fail.
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('FATAL: unhandled rejection:', reason)
+    const msg = `FATAL: unhandled rejection: ${reason}`
+    console.error(msg)
+    reportHealth('sender', 'error', { errorMessage: msg }).catch(() => {})
     process.exit(1)
   })
 
   const app = createApp()
-  app.listen(PORT, '127.0.0.1', () => {
+  const server = app.listen(PORT, '127.0.0.1', () => {
     console.log(`Pugs sender listening on http://127.0.0.1:${PORT}`)
+  })
+
+  server.on('error', (err) => {
+    const msg = `Server error: ${err.message}`
+    console.error(msg)
+    reportHealth('sender', 'error', { errorMessage: msg }).catch(() => {})
+    process.exit(1)
   })
 }
