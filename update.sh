@@ -99,8 +99,11 @@ fi
 # Capture the current HEAD before fetch so we can detect a no-op.
 OLD_HEAD=$(git rev-parse HEAD 2>/dev/null || echo unknown)
 
-if ! git fetch --quiet 2>&1; then
-  echo "$LOG_PREFIX git fetch failed (network? auth?), bailing"
+# Timeout git fetch to prevent a hung network from stalling the updater
+# and blocking all subsequent update cycles. 30s is generous for a normal
+# fetch but tight enough to fail fast on SSH stalls or network hangs.
+if ! timeout 30 git fetch --quiet 2>&1; then
+  echo "$LOG_PREFIX git fetch failed (network? auth? timeout?), bailing"
   exit 0
 fi
 
