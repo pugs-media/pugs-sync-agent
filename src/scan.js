@@ -295,6 +295,44 @@ function assertChatDbSchema(db) {
 }
 
 /**
+ * Detect and recover from ROWID reset (VACUUM, macOS upgrade, Time Machine restore).
+ * If the stored last_rowid is significantly greater than the current max ROWID,
+ * it's a reset — fall back to a safe cutoff. Pure — injectable `now` makes it
+ * unit-testable.
+ *
+ * Returns { cutoffRowid: number, detected: bool, reason: string|null }.
+ *
+ * @param {import('better-sqlite3').Database} db  open snapshot DB
+ * @param {number} lastRowid   stored highwater mark
+ * @returns {object}
+ */
+function detectAndRecoverRowidReset(db, lastRowid) {
+  if (lastRowid === 0) return { cutoffRowid: 0, detected: false, reason: null }
+
+  const maxRow = db.prepare('SELECT MAX(ROWID) AS max_id FROM message').get()
+  const maxRowid = maxRow?.max_id || 0
+
+  // If max ROWID is 0 (empty table), no new messages — no reset needed, preserve cutoff
+  if (maxRowid === 0) return { cutoffRowid: lastRowid, detected: false, reason: null }
+
+  // Large gap (>100K) suggests reset: stored cursor is ahead of current max.
+  // Safe fallback: start from the most recent 7 days of messages to prevent
+  // dump of pre-reset history while still catching recent messages.
+  const ROWID_RESET_THRESHOLD = 100_000
+  if (lastRowid > maxRowid + ROWID_RESET_THRESHOLD) {
+    const cutoffMs = Date.now() - 7 * 86400000  // 7 days back
+    const cutoffAppleNs = (cutoffMs - 978307200000) * 1e6
+    const row = db.prepare(
+      'SELECT ROWID FROM message WHERE date >= ? ORDER BY ROWID ASC LIMIT 1'
+    ).get(cutoffAppleNs)
+    const safeCutoff = row ? row.ROWID - 1 : maxRowid
+    return { cutoffRowid: safeCutoff, detected: true, reason: `ROWID reset detected (was ${lastRowid}, now max ${maxRowid})` }
+  }
+
+  return { cutoffRowid: lastRowid, detected: false, reason: null }
+}
+
+/**
  * Query new messages from a chat.db snapshot.
  *
  * Uses a first_chat CTE to deduplicate: a message appearing in multiple rows
@@ -408,6 +446,15 @@ async function main() {
     snapshotPath = snapshotDb()
     db = new Database(snapshotPath, { readonly: true })
     assertChatDbSchema(db)
+
+    // Detect ROWID reset (VACUUM, macOS upgrade) — if last_rowid is far ahead
+    // of current max, it's a reset. Fall back to 7-day window to avoid losing
+    // recent messages and not dumping pre-reset history.
+    const resetCheck = detectAndRecoverRowidReset(db, cutoffRowid)
+    if (resetCheck.detected) {
+      console.warn(`${resetCheck.reason} — recovering with 7-day fallback`)
+      cutoffRowid = resetCheck.cutoffRowid
+    }
 
     if (cutoffRowid === 0 && INITIAL_BACKFILL_DAYS > 0) {
       const cutoffMs = Date.now() - INITIAL_BACKFILL_DAYS * 86400000
@@ -572,4 +619,4 @@ if (require.main === module) {
     })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, queryNewMessages, shouldSyncContacts }
+module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts }

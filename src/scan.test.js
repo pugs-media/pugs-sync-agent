@@ -7,7 +7,7 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
 const Database = require('better-sqlite3')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, queryNewMessages, shouldSyncContacts } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -1210,4 +1210,69 @@ test('shouldSyncContacts: skips if <60s since last sync and no new drafts', () =
   const result = shouldSyncContacts(lastSync, 0, { now })
   assert.equal(result.should, false, 'should not trigger when too recent and no new drafts')
   assert.equal(result.trigger, null)
+})
+
+// ── ROWID reset detection and recovery ──────────────────────────────────────
+// When VACUUM or macOS upgrade resets the ROWID sequence, last_rowid from the
+// state file becomes ahead of the current max ROWID. Without detection, the
+// next scan's "WHERE m.ROWID > last_rowid" query returns zero rows, silently
+// dropping all messages — a lost-lead catastrophe. detectAndRecoverRowidReset
+// must catch this and fall back to a safe window to prevent message loss.
+
+test('detectAndRecoverRowidReset: returns unchanged cutoff when no reset detected', () => {
+  // In-memory test DB with max ROWID = 5000, stored cutoff = 4500
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (
+    ROWID INTEGER PRIMARY KEY,
+    guid TEXT,
+    text TEXT,
+    date REAL
+  )`)
+  for (let i = 1; i <= 5000; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`msg-${i}`, `text ${i}`, 1609459200000000000)
+  }
+  const result = detectAndRecoverRowidReset(db, 4500)
+  assert.equal(result.detected, false, 'should not detect reset with normal gap')
+  assert.equal(result.cutoffRowid, 4500, 'should return original cutoff')
+  assert.equal(result.reason, null)
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: detects reset when stored cursor >>  current max', () => {
+  // In-memory test DB with max ROWID = 5000, but stored cutoff = 200000 (reset!)
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (
+    ROWID INTEGER PRIMARY KEY,
+    guid TEXT,
+    text TEXT,
+    date REAL
+  )`)
+  // Add 5000 rows with recent timestamps
+  for (let i = 1; i <= 5000; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`msg-${i}`, `text ${i}`, 1609459200000000000)
+  }
+  const result = detectAndRecoverRowidReset(db, 200000)
+  assert.equal(result.detected, true, 'should detect ROWID reset')
+  assert.ok(result.reason.includes('ROWID reset detected'), 'reason should mention reset')
+  assert.ok(result.cutoffRowid < 5000, 'fallback cutoff should be less than current max')
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: handles last_rowid=0 (first run)', () => {
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT)`)
+  db.prepare('INSERT INTO message (guid) VALUES (?)').run('msg-1')
+  const result = detectAndRecoverRowidReset(db, 0)
+  assert.equal(result.detected, false, 'should not detect reset on first run')
+  assert.equal(result.cutoffRowid, 0, 'should preserve zero cutoff')
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: handles empty message table', () => {
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT)`)
+  const result = detectAndRecoverRowidReset(db, 1000)
+  assert.equal(result.detected, false, 'should not detect reset on empty table')
+  assert.equal(result.cutoffRowid, 1000, 'should preserve stored cutoff')
+  db.close()
 })
