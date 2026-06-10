@@ -333,6 +333,21 @@ async function loop({
 }
 
 if (require.main === module) {
+  // Catch unhandled exceptions so they're logged before the process exits.
+  // launchd will restart the poller, but without this, crashes would appear
+  // only in poller.error.log — easy to miss in triage.
+  process.on('uncaughtException', (err) => {
+    log('FATAL: uncaught exception:', err.message)
+    log(err.stack || err)
+    process.exit(1)
+  })
+
+  // Catch unhandled promise rejections so they don't silently fail.
+  process.on('unhandledRejection', (reason, promise) => {
+    log('FATAL: unhandled rejection:', reason)
+    process.exit(1)
+  })
+
   // On SIGTERM (launchctl unload / auto-updater reload) or SIGINT (Ctrl-C),
   // drain the current poll cycle then exit cleanly rather than dying mid-dispatch.
   process.once('SIGTERM', () => { log('SIGTERM — draining current poll cycle then exiting'); shuttingDown = true })

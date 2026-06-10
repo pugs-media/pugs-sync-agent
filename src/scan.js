@@ -622,6 +622,21 @@ async function main() {
 }
 
 if (require.main === module) {
+  // Catch unhandled exceptions so they're logged before the process exits.
+  // launchd will restart the scanner, but without this, crashes would appear
+  // only in scanner.error.log — easy to miss in triage.
+  process.on('uncaughtException', (err) => {
+    console.error('FATAL: uncaught exception:', err.message)
+    console.error(err.stack || err)
+    process.exit(1)
+  })
+
+  // Catch unhandled promise rejections so they don't silently fail.
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('FATAL: unhandled rejection:', reason)
+    process.exit(1)
+  })
+
   const startMs = Date.now()
   main()
     .then(result => {
