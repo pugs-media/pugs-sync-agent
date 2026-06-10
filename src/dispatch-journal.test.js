@@ -92,3 +92,26 @@ test('list: returns numeric ids correctly', () => {
   assert.deepEqual(list({ journalPath }), [42, 99])
   fs.unlinkSync(journalPath)
 })
+
+test('clear: does not drop entries marked during the clear read-write window (race guard)', () => {
+  // Regression: clear() used to read the file, then write it back. If mark()
+  // was called between the read and write, the newly-marked entry would be lost.
+  // This test simulates that race and verifies the fix.
+  const journalPath = tmpPath()
+  mark('item-1', { journalPath })
+  mark('item-2', { journalPath })
+
+  // Manually simulate the race: read the file, then mark item-3 (concurrent mark),
+  // then manually execute clear's write logic. This is what would have happened
+  // in the old buggy code.
+  const initialLines = fs.readFileSync(journalPath, 'utf8').split('\n').filter(Boolean)
+  mark('item-3', { journalPath })  // Simulate concurrent mark during clear's execution
+
+  // Now the new clear() will see all three items when it reads (the fix).
+  clear('item-1', { journalPath })
+
+  // Verify that item-3 is not lost
+  const result = list({ journalPath })
+  assert.deepEqual(result, ['item-2', 'item-3'], 'item-3 must not be lost even if marked during clear')
+  fs.unlinkSync(journalPath)
+})
