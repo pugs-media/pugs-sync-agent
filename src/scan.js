@@ -431,7 +431,18 @@ async function main() {
     // pugs-sales can give every message a stable thread identity.
     const rows = queryNewMessages(db, cutoffRowid, BATCH_SIZE)
 
-    if (!rows.length) {
+    // GUID-based dedup: filter out rows we've already sent (by GUID).
+    // This guards against ROWID reset (SQLite VACUUM or major macOS updates).
+    const sentGuids = state.sent_guids ? new Set(state.sent_guids) : new Set()
+    const dedupedRows = rows.filter(row => {
+      if (sentGuids.has(row.guid)) {
+        console.log(`Dedup skip GUID ${row.guid} (ROWID ${row.rowid}) — already sent in prior run`)
+        return false
+      }
+      return true
+    })
+
+    if (!dedupedRows.length && !rows.length) {
       // Post empty payload so the server records a heartbeat — otherwise
       // a silent scanner is indistinguishable from a crashed scanner.
       console.log('No new messages — sending heartbeat')
@@ -443,7 +454,7 @@ async function main() {
       }
       // Fall through to contacts sync — the hourly cadence must fire even
       // on quiet runs with no new messages so address-book renames stay current.
-    } else {
+    } else if (dedupedRows.length > 0) {
 
     // Row -> cloud payload mapping lives in ./payload.js (pure + unit-tested) so
     // the group_concat participant separator and sent_at/handle drop rules cannot
@@ -471,7 +482,7 @@ async function main() {
       console.log(`Dropped ${droppedNotProspect + droppedWrongAccount}/${beforeProspect} rows (${droppedNotProspect} not-prospect, ${droppedWrongAccount} wrong-apple-id)`)
     }
 
-    console.log(`Posting ${filteredPayload.length} messages (ROWIDs ${rows[0].rowid}..${rows[rows.length - 1].rowid})`)
+    console.log(`Posting ${filteredPayload.length} messages (ROWIDs ${dedupedRows[0].rowid}..${dedupedRows[dedupedRows.length - 1].rowid})`)
 
     let webhookResp
     try {
@@ -488,10 +499,16 @@ async function main() {
     // server-side response shape might evolve.
     newDraftsThisRun = parseNewDraftsCount(text)
 
-    // Only advance state if the POST succeeded
-    const lastRowid = rows[rows.length - 1].rowid
-    saveState(STATE_PATH, { ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
-    console.log(`Advanced state to ROWID ${lastRowid}`)
+    // Only advance state if the POST succeeded.
+    // Track GUIDs of sent messages so we can dedup on ROWID reset.
+    // Keep the sent_guids set bounded to avoid unbounded growth.
+    const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
+    const guidsToAdd = dedupedRows.map(r => r.guid)
+    const newSentGuids = [...sentGuids, ...guidsToAdd]
+    const MAX_SENT_GUIDS = 10000
+    const boundedSentGuids = newSentGuids.slice(-MAX_SENT_GUIDS)
+    saveState(STATE_PATH, { ...state, last_rowid: lastRowid, sent_guids: boundedSentGuids, last_run_at: new Date().toISOString() })
+    console.log(`Advanced state to ROWID ${lastRowid}, tracked ${boundedSentGuids.length} sent GUIDs`)
     } // end else (rows.length > 0)
   } finally {
     if (db) db.close()
