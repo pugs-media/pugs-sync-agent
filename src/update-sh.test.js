@@ -39,6 +39,14 @@ test('update.sh: git merge output is captured (not redirected to /dev/null)', ()
 
 // ── npm error surfacing ───────────────────────────────────────────────────────
 
+test('update.sh: npm install is wrapped in timeout to prevent hangs', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  assert.ok(
+    src.includes('timeout 30 npm install'),
+    'npm install must be wrapped with timeout to prevent registry/node hangs from blocking the updater'
+  )
+})
+
 test('update.sh: npm install does not use --silent (hides errors)', () => {
   const src = fs.readFileSync(UPDATE_SH, 'utf8')
   assert.ok(

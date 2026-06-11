@@ -126,7 +126,8 @@ echo "$LOG_PREFIX pulled $OLD_HEAD..$NEW_HEAD"
 
 # Reinstall deps in case package.json changed. --no-audit --no-fund for speed;
 # --loglevel error keeps errors visible while suppressing progress/info noise.
-if ! npm_out=$(npm install --loglevel error --no-audit --no-fund 2>&1); then
+# Wrap in timeout so a hung registry/node process doesn't block the entire updater.
+if ! npm_out=$(timeout 30 npm install --loglevel error --no-audit --no-fund 2>&1); then
   echo "$LOG_PREFIX npm install failed — NOT reloading services, prior version still running"
   printf '%s\n' "$npm_out" | head -20 | sed "s|^|$LOG_PREFIX npm: |"
   # Report the failure to the cloud
