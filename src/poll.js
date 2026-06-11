@@ -48,7 +48,13 @@ if (!WEBHOOK_URL || !SECRET) {
 
 // Derive the cloud-app API origin from the inbound webhook URL — same host.
 // e.g. https://pugs-sales.vercel.app/api/import/imessage → https://pugs-sales.vercel.app
-const API_BASE = new URL(WEBHOOK_URL).origin
+let API_BASE
+try {
+  API_BASE = new URL(WEBHOOK_URL).origin
+} catch (e) {
+  console.error(`Invalid PUGS_SYNC_WEBHOOK_URL: ${e.message}`)
+  process.exit(2)
+}
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args)
