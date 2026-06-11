@@ -159,3 +159,26 @@ test('reportHealth: requires only service and status, rest optional', async () =
   assert.equal(body.error, undefined)
   assert.equal(body.run_duration_ms, undefined)
 })
+
+test('reportHealth: gracefully handles malformed webhookUrl', async () => {
+  let fetchCalled = false
+  const mockFetch = async () => {
+    fetchCalled = true
+    return { ok: true, status: 200 }
+  }
+
+  // Should not throw even with malformed URL
+  let errorThrown = false
+  try {
+    await reportHealth('scanner', 'ok', {
+      webhookUrl: 'not a valid url :::',
+      secret: 'test-secret',
+      _fetch: mockFetch,
+    })
+  } catch (e) {
+    errorThrown = true
+  }
+
+  assert.equal(errorThrown, false, 'should not throw on malformed URL')
+  assert.equal(fetchCalled, false, 'should not attempt to send on malformed URL')
+})

@@ -36,8 +36,15 @@ async function reportHealth(service, status, {
     return
   }
 
-  const base = new URL(webhookUrl).origin
-  const url = `${base}/api/sync/health`
+  let url
+  try {
+    const base = new URL(webhookUrl).origin
+    url = `${base}/api/sync/health`
+  } catch (e) {
+    // Invalid webhook URL — swallow and return (best-effort)
+    console.warn(`health report ${service} config error (malformed URL): ${e.message || e}`)
+    return
+  }
 
   const payload = { service, status }
   if (itemCount !== undefined) payload.item_count = itemCount
