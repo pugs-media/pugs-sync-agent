@@ -51,6 +51,16 @@ if (!Number.isInteger(SENDER_PORT) || SENDER_PORT < 1 || SENDER_PORT > 65535) {
   process.exit(2)
 }
 
+if (!Number.isInteger(POLL_INTERVAL_MS) || POLL_INTERVAL_MS < 1) {
+  console.error(`Invalid POLL_INTERVAL_MS: "${process.env.POLL_INTERVAL_MS || '5000'}" — must be a positive integer (milliseconds)`)
+  process.exit(2)
+}
+
+if (!Number.isInteger(MAX_ATTEMPTS) || MAX_ATTEMPTS < 0) {
+  console.error(`Invalid MAX_ATTEMPTS: "${process.env.MAX_ATTEMPTS || '5'}" — must be a non-negative integer`)
+  process.exit(2)
+}
+
 // Derive the cloud-app API origin from the inbound webhook URL — same host.
 // e.g. https://pugs-sales.vercel.app/api/import/imessage → https://pugs-sales.vercel.app
 let API_BASE

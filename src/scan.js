@@ -60,6 +60,11 @@ try {
   process.exit(2)
 }
 
+if (!Number.isInteger(INITIAL_BACKFILL_DAYS) || INITIAL_BACKFILL_DAYS < 0) {
+  console.error(`Invalid INITIAL_BACKFILL_DAYS: "${process.env.INITIAL_BACKFILL_DAYS || '90'}" — must be a non-negative integer`)
+  process.exit(2)
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Helpers
 
