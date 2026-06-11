@@ -53,6 +53,13 @@ if (!WEBHOOK_URL || !SECRET) {
   process.exit(2)
 }
 
+try {
+  new URL(WEBHOOK_URL)
+} catch (e) {
+  console.error(`Invalid PUGS_SYNC_WEBHOOK_URL: ${e.message}`)
+  process.exit(2)
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Helpers
 
