@@ -46,6 +46,11 @@ if (!WEBHOOK_URL || !SECRET) {
   process.exit(2)
 }
 
+if (!Number.isInteger(SENDER_PORT) || SENDER_PORT < 1 || SENDER_PORT > 65535) {
+  console.error(`Invalid SENDER_PORT: "${process.env.SENDER_PORT || '7890'}" — must be a port number 1-65535`)
+  process.exit(2)
+}
+
 // Derive the cloud-app API origin from the inbound webhook URL — same host.
 // e.g. https://pugs-sales.vercel.app/api/import/imessage → https://pugs-sales.vercel.app
 let API_BASE
