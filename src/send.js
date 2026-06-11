@@ -84,6 +84,10 @@ if (require.main === module) {
     console.error('Missing PUGS_SYNC_SECRET in .env')
     process.exit(2)
   }
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    console.error(`Invalid SENDER_PORT: "${process.env.SENDER_PORT || '7890'}" — must be a port number 1-65535`)
+    process.exit(2)
+  }
 
   // Catch unhandled exceptions so they're logged before the process exits.
   // launchd will restart the sender, but without this, crashes would appear

@@ -151,3 +151,109 @@ test('scan.js: exits with code 2 when PUGS_SYNC_WEBHOOK_URL is malformed', () =>
     )
   }
 })
+
+// ── send.js: invalid SENDER_PORT ────────────────────────────────────────
+
+test('send.js: exits with code 2 when SENDER_PORT is not a valid port number', () => {
+  const env = { ...process.env }
+  env.SENDER_PORT = 'not-a-port'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SEND_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected send.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `send.js must exit with code 2 on invalid SENDER_PORT, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid SENDER_PORT'),
+      'stderr must mention invalid SENDER_PORT'
+    )
+  }
+})
+
+test('send.js: exits with code 2 when SENDER_PORT is out of range (0)', () => {
+  const env = { ...process.env }
+  env.SENDER_PORT = '0'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SEND_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected send.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `send.js must exit with code 2 on port 0, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid SENDER_PORT'),
+      'stderr must mention invalid SENDER_PORT'
+    )
+  }
+})
+
+test('send.js: exits with code 2 when SENDER_PORT is out of range (>65535)', () => {
+  const env = { ...process.env }
+  env.SENDER_PORT = '99999'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SEND_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected send.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `send.js must exit with code 2 on port >65535, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid SENDER_PORT'),
+      'stderr must mention invalid SENDER_PORT'
+    )
+  }
+})
+
+// ── poll.js: invalid SENDER_PORT ────────────────────────────────────────
+
+test('poll.js: exits with code 2 when SENDER_PORT is not a valid port number', () => {
+  const env = { ...process.env }
+  env.SENDER_PORT = 'not-a-port'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on invalid SENDER_PORT, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid SENDER_PORT'),
+      'stderr must mention invalid SENDER_PORT'
+    )
+  }
+})
+
+test('poll.js: exits with code 2 when SENDER_PORT is out of range (65536)', () => {
+  const env = { ...process.env }
+  env.SENDER_PORT = '65536'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on port >65535, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid SENDER_PORT'),
+      'stderr must mention invalid SENDER_PORT'
+    )
+  }
+})
