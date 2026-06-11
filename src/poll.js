@@ -110,7 +110,9 @@ async function fetchPendingBatch({
     }
     const errText = (await res.text()).slice(0, 300)
     const err = new Error(`queue GET ${res.status}: ${errText}`)
-    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    // 408 (Request Timeout) and 429 (Too Many Requests) are transient; retry with backoff.
+    // Other 4xx are permanent failures (bad auth, bad request) — throw immediately, no retry.
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) throw err
     lastError = err
     if (attempt < MAX_QUEUE_FETCH_TRIES) await _delay(500 * attempt)
   }
@@ -140,7 +142,9 @@ async function reportOutcome(id, payload, {
       }, _timeoutMs, _fetch)
       if (res.ok) return true
       const errText = (await res.text()).slice(0, 200)
-      if (res.status >= 400 && res.status < 500) {
+      // 408 (Request Timeout) and 429 (Too Many Requests) are transient; retry with backoff.
+      // Other 4xx are permanent failures (bad auth, bad request) — don't retry, allow journal clear.
+      if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
         log(`report-outcome ${id} permanent error ${res.status} — not retrying: ${errText}`)
         return true  // Cloud will not accept a retry; safe to clear the journal entry
       }

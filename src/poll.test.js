@@ -218,6 +218,46 @@ test('reportOutcome: does not invoke _delay on 4xx fast-fail', async () => {
   assert.equal(delayed, false, '_delay must not be called on permanent 4xx')
 })
 
+test('reportOutcome: retries on 408 (request timeout) like a transient error', async () => {
+  let calls = 0
+  await reportOutcome('id-9', { status: 'sent' }, {
+    _fetch: async () => { calls++; return calls === 1 ? { ok: false, status: 408, text: async () => 'Request Timeout' } : okResponse() },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, '408 must trigger retry and succeed on second attempt')
+})
+
+test('reportOutcome: retries on 429 (rate limit) like a transient error', async () => {
+  let calls = 0
+  await reportOutcome('id-10', { status: 'sent' }, {
+    _fetch: async () => { calls++; return calls === 1 ? { ok: false, status: 429, text: async () => 'Too Many Requests' } : okResponse() },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, '429 must trigger retry and succeed on second attempt')
+})
+
+test('reportOutcome: succeeds on 2nd attempt after a 408 timeout', async () => {
+  let calls = 0
+  await reportOutcome('id-11', { status: 'sent' }, {
+    _fetch: async () => { calls++; return calls === 1 ? { ok: false, status: 408, text: async () => 'timeout' } : okResponse() },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, 'should succeed after retrying 408')
+})
+
+test('reportOutcome: throws after all 3 retries exhausted on repeated 429', async () => {
+  let calls = 0
+  try {
+    await reportOutcome('id-12', { status: 'sent' }, {
+      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'rate limit' } },
+      _delay: noDelay,
+    })
+  } catch {
+    // expected: no throw on exhausted retries (log-and-swallow), but we call it anyway
+  }
+  assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times on repeated 429')
+})
+
 // ---------------------------------------------------------------------------
 // fetchPendingBatch
 // ---------------------------------------------------------------------------
@@ -324,6 +364,60 @@ test('fetchPendingBatch: uses increasing backoff between retries', async () => {
     }),
   )
   assert.deepEqual(delays, [500, 1000], 'delays should be 500ms then 1000ms (500 * attempt)')
+})
+
+test('fetchPendingBatch: retries on 408 (request timeout) like a transient error', async () => {
+  let calls = 0
+  const items = [{ id: 'q-408', to_handle: '+14155550100', body: 'hello', attempts: 0 }]
+  const result = await fetchPendingBatch({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 408, text: async () => 'Request Timeout' }
+      return { ok: true, json: async () => ({ items }) }
+    },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, '408 must trigger retry and succeed on second attempt')
+  assert.deepEqual(result, items)
+})
+
+test('fetchPendingBatch: retries on 429 (rate limit) like a transient error', async () => {
+  let calls = 0
+  const items = [{ id: 'q-429', to_handle: '+14155550100', body: 'hi', attempts: 0 }]
+  const result = await fetchPendingBatch({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 429, text: async () => 'Too Many Requests' }
+      return { ok: true, json: async () => ({ items }) }
+    },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 2, '429 must trigger retry and succeed on second attempt')
+  assert.deepEqual(result, items)
+})
+
+test('fetchPendingBatch: throws after all 3 retries exhausted on repeated 408', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => { calls++; return { ok: false, status: 408, text: async () => 'timeout' } },
+      _delay: noDelay,
+    }),
+    /queue GET 408/,
+  )
+  assert.equal(calls, 3, 'should try exactly 3 times before throwing on repeated 408')
+})
+
+test('fetchPendingBatch: throws after all 3 retries exhausted on repeated 429', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchPendingBatch({
+      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'rate limit' } },
+      _delay: noDelay,
+    }),
+    /queue GET 429/,
+  )
+  assert.equal(calls, 3, 'should try exactly 3 times before throwing on repeated 429')
 })
 
 test('fetchPendingBatch: throws descriptive error when HTTP 200 body is not valid JSON', async () => {
