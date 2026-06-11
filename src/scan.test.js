@@ -145,6 +145,54 @@ test('fetchProspectHandles: does not retry on 403 (permanent auth failure)', asy
   assert.equal(calls, 1, 'should not retry on 4xx — permanent error, retrying wastes time')
 })
 
+test('fetchProspectHandles: retries on 408 (request timeout) like a transient error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch: async () => { calls++; return { ok: false, status: 408, text: async () => 'request timeout' } },
+      _delay: NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret: 'test-secret',
+      scannerId: '',
+    }),
+    /prospect-handles 408/,
+  )
+  assert.equal(calls, 3, '408 should be retried like 503')
+})
+
+test('fetchProspectHandles: retries on 429 (rate limit) like a transient error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => fetchProspectHandles({
+      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'too many requests' } },
+      _delay: NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret: 'test-secret',
+      scannerId: '',
+    }),
+    /prospect-handles 429/,
+  )
+  assert.equal(calls, 3, '429 should be retried like 503')
+})
+
+test('fetchProspectHandles: succeeds on 2nd attempt after a 429 rate limit', async () => {
+  let calls = 0
+  const body = { phones: ['4155550100'], emails: [], count_phones: 1, count_emails: 0 }
+  const result = await fetchProspectHandles({
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 429, text: async () => 'too many requests' }
+      return { ok: true, json: async () => body }
+    },
+    _delay: NOOP_DELAY,
+    webhookUrl: 'https://example.pugs.media/api/import/imessage',
+    secret: 'test-secret',
+    scannerId: '',
+  })
+  assert.equal(calls, 2, 'should retry once on 429 and succeed')
+  assert.ok(result.phones.has('4155550100'))
+})
+
 test('fetchProspectHandles: retries on network error and succeeds on next attempt', async () => {
   let calls = 0
   const body = { phones: ['4155550100'], emails: [], count_phones: 1, count_emails: 0 }
@@ -402,6 +450,50 @@ test('postToWebhook: throws immediately on 403 — permanent, no retry', async (
     /webhook 403/,
   )
   assert.equal(calls, 1, '4xx must not be retried')
+})
+
+test('postToWebhook: retries on 408 (request timeout) like a transient error', async () => {
+  let calls = 0
+  const payload = { messages: [{ id: 1 }] }
+  await assert.rejects(
+    () => postToWebhook(payload, {
+      _fetch: async () => { calls++; return { ok: false, status: 408, text: async () => 'request timeout' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 408/,
+  )
+  assert.equal(calls, 3, '408 should be retried like 503')
+})
+
+test('postToWebhook: retries on 429 (rate limit) like a transient error', async () => {
+  let calls = 0
+  const payload = { messages: [{ id: 1 }] }
+  await assert.rejects(
+    () => postToWebhook(payload, {
+      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'too many requests' } },
+      _delay: NOOP_DELAY,
+      ...WEBHOOK_OPTS,
+    }),
+    /webhook 429/,
+  )
+  assert.equal(calls, 3, '429 should be retried like 503')
+})
+
+test('postToWebhook: succeeds on 2nd attempt after a 429 rate limit', async () => {
+  let calls = 0
+  const payload = { messages: [{ id: 1, text: 'test' }] }
+  const result = await postToWebhook(payload, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 429, text: async () => 'too many requests' }
+      return { ok: true, status: 200, text: async () => 'ok' }
+    },
+    _delay: NOOP_DELAY,
+    ...WEBHOOK_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on 429 and succeed')
+  assert.ok(result.ok)
 })
 
 test('postToWebhook: throws after all 3 retries exhausted on 503', async () => {

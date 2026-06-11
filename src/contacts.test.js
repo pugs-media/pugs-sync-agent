@@ -304,6 +304,47 @@ test('postContactsPayload: throws immediately on 403 — permanent, no retry', a
   assert.equal(calls, 1, '4xx must not be retried')
 })
 
+test('postContactsPayload: retries on 408 (request timeout) like a transient error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 408, text: async () => 'request timeout' } },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /contacts webhook 408/,
+  )
+  assert.equal(calls, 3, '408 should be retried like 503')
+})
+
+test('postContactsPayload: retries on 429 (rate limit) like a transient error', async () => {
+  let calls = 0
+  await assert.rejects(
+    () => postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'too many requests' } },
+      _delay: NOOP_DELAY,
+      ...CONTACTS_OPTS,
+    }),
+    /contacts webhook 429/,
+  )
+  assert.equal(calls, 3, '429 should be retried like 503')
+})
+
+test('postContactsPayload: succeeds on 2nd attempt after a 429 rate limit', async () => {
+  let calls = 0
+  const result = await postContactsPayload(CONTACTS_URL, { phones: [], emails: [] }, {
+    _fetch: async () => {
+      calls++
+      if (calls === 1) return { ok: false, status: 429, text: async () => 'too many requests' }
+      return { ok: true, status: 200, text: async () => 'ok' }
+    },
+    _delay: NOOP_DELAY,
+    ...CONTACTS_OPTS,
+  })
+  assert.equal(calls, 2, 'should retry once on 429 and succeed')
+  assert.ok(result.ok)
+})
+
 test('postContactsPayload: throws after all 3 retries exhausted on 503', async () => {
   let calls = 0
   await assert.rejects(
