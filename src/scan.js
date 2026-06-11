@@ -190,7 +190,9 @@ async function postToWebhook(payload, {
     if (res.ok) return res
     const errText = (await res.text()).slice(0, 500)
     const err = new Error(`webhook ${res.status}: ${errText}`)
-    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    // 408 (timeout) and 429 (rate limit) are transient; retry like 5xx.
+    // Other 4xx (401, 403, 400) are permanent — no retry.
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) throw err
     lastError = err
     if (attempt < MAX_WEBHOOK_POST_TRIES) await _delay(500 * attempt)
   }
@@ -269,7 +271,9 @@ async function fetchProspectHandles({
     }
     const errText = (await res.text()).slice(0, 200)
     const err = new Error(`prospect-handles ${res.status}: ${errText}`)
-    if (res.status >= 400 && res.status < 500) throw err  // permanent: no retry
+    // 408 (timeout) and 429 (rate limit) are transient; retry like 5xx.
+    // Other 4xx (401, 403, 400) are permanent — no retry.
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) throw err
     lastError = err
     if (attempt < MAX_PROSPECT_FETCH_TRIES) await _delay(500 * attempt)
   }
