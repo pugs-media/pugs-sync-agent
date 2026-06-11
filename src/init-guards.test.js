@@ -257,3 +257,135 @@ test('poll.js: exits with code 2 when SENDER_PORT is out of range (65536)', () =
     )
   }
 })
+
+// ── poll.js: invalid POLL_INTERVAL_MS ────────────────────────────────────
+
+test('poll.js: exits with code 2 when POLL_INTERVAL_MS is not a number', () => {
+  const env = { ...process.env }
+  env.POLL_INTERVAL_MS = 'not-a-number'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on invalid POLL_INTERVAL_MS, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid POLL_INTERVAL_MS'),
+      'stderr must mention invalid POLL_INTERVAL_MS'
+    )
+  }
+})
+
+test('poll.js: exits with code 2 when POLL_INTERVAL_MS is zero or negative', () => {
+  const env = { ...process.env }
+  env.POLL_INTERVAL_MS = '0'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on POLL_INTERVAL_MS=0, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid POLL_INTERVAL_MS'),
+      'stderr must mention invalid POLL_INTERVAL_MS'
+    )
+  }
+})
+
+// ── poll.js: invalid MAX_ATTEMPTS ────────────────────────────────────────
+
+test('poll.js: exits with code 2 when MAX_ATTEMPTS is not a number', () => {
+  const env = { ...process.env }
+  env.MAX_ATTEMPTS = 'not-a-number'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on invalid MAX_ATTEMPTS, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid MAX_ATTEMPTS'),
+      'stderr must mention invalid MAX_ATTEMPTS'
+    )
+  }
+})
+
+test('poll.js: exits with code 2 when MAX_ATTEMPTS is negative', () => {
+  const env = { ...process.env }
+  env.MAX_ATTEMPTS = '-1'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${POLL_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected poll.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `poll.js must exit with code 2 on MAX_ATTEMPTS < 0, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid MAX_ATTEMPTS'),
+      'stderr must mention invalid MAX_ATTEMPTS'
+    )
+  }
+})
+
+// ── scan.js: invalid INITIAL_BACKFILL_DAYS ───────────────────────────────
+
+test('scan.js: exits with code 2 when INITIAL_BACKFILL_DAYS is not a number', () => {
+  const env = { ...process.env }
+  env.INITIAL_BACKFILL_DAYS = 'not-a-number'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SCAN_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected scan.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `scan.js must exit with code 2 on invalid INITIAL_BACKFILL_DAYS, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid INITIAL_BACKFILL_DAYS'),
+      'stderr must mention invalid INITIAL_BACKFILL_DAYS'
+    )
+  }
+})
+
+test('scan.js: exits with code 2 when INITIAL_BACKFILL_DAYS is negative', () => {
+  const env = { ...process.env }
+  env.INITIAL_BACKFILL_DAYS = '-5'
+  env.PUGS_SYNC_WEBHOOK_URL = 'https://example.com/api/import/imessage'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SCAN_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected scan.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `scan.js must exit with code 2 on INITIAL_BACKFILL_DAYS < 0, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid INITIAL_BACKFILL_DAYS'),
+      'stderr must mention invalid INITIAL_BACKFILL_DAYS'
+    )
+  }
+})
