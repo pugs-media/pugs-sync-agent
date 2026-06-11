@@ -131,3 +131,23 @@ test('poll.js: exits with code 2 when PUGS_SYNC_WEBHOOK_URL is malformed', () =>
     )
   }
 })
+
+test('scan.js: exits with code 2 when PUGS_SYNC_WEBHOOK_URL is malformed', () => {
+  const env = { ...process.env }
+  env.PUGS_SYNC_WEBHOOK_URL = 'not a valid url'
+  env.PUGS_SYNC_SECRET = 'test-secret'
+
+  try {
+    execSync(`node ${SCAN_JS}`, { env, timeout: 5000, stdio: 'pipe' })
+    assert.fail('Expected scan.js to exit with code 2, but it did not exit with error')
+  } catch (e) {
+    assert.equal(
+      e.status, 2,
+      `scan.js must exit with code 2 on malformed PUGS_SYNC_WEBHOOK_URL, got code ${e.status}`
+    )
+    assert.ok(
+      e.stderr?.toString().includes('Invalid PUGS_SYNC_WEBHOOK_URL'),
+      'stderr must mention invalid webhook URL'
+    )
+  }
+})
