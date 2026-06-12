@@ -1102,3 +1102,48 @@ test('loop: reports health=ok with itemCount=0 on empty queue (no fetchError)', 
   assert.equal(healthCalls[0].status, 'ok', 'empty queue (no fetchError) must be ok, not error')
   assert.equal(healthCalls[0].opts.itemCount, 0)
 })
+
+// ── loop: exception path ───────────────────────────────────────────────────────
+// When _pollOnce throws (e.g. an unhandled DB error inside flushJournal), the
+// loop must NOT exit — it must catch the error, report health=error, and continue
+// to the next cycle. An uncaught throw that kills the loop stops ALL outbound
+// iMessage dispatch until launchd restarts the poller (5+ seconds gap, items
+// re-queued as duplicates).
+
+test('loop: reports health=error when pollOnce throws unexpectedly', async () => {
+  let shutDown = false
+  const healthCalls = []
+  await loop({
+    _pollOnce: async () => { shutDown = true; throw new Error('unexpected DB crash') },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+    _reportHealth: (service, status, opts) => { healthCalls.push({ service, status, opts }) },
+  })
+  assert.equal(healthCalls.length, 1, 'exactly one health report per cycle even on throw')
+  assert.equal(healthCalls[0].service, 'poller')
+  assert.equal(healthCalls[0].status, 'error', 'thrown exception must surface as health=error')
+  assert.ok(
+    healthCalls[0].opts.errorMessage.includes('unexpected DB crash'),
+    'error message from the thrown exception must be forwarded to health report'
+  )
+})
+
+test('loop: continues to the next cycle after pollOnce throws (does not exit on exception)', async () => {
+  // Guard against a regression where the catch block rethrows or exits early,
+  // which would stop all outbound dispatch until launchd restarts the poller.
+  let cycles = 0
+  let shutDown = false
+  await loop({
+    _pollOnce: async () => {
+      cycles++
+      if (cycles < 3) throw new Error(`transient failure #${cycles}`)
+      // Shut down cleanly on the third cycle to end the test.
+      shutDown = true
+      return { itemCount: 0 }
+    },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+    _reportHealth: () => {},
+  })
+  assert.equal(cycles, 3, 'loop must run all 3 cycles; exiting on throw would give cycles < 3')
+})
