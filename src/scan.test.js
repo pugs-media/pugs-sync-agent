@@ -1483,3 +1483,30 @@ test('detectAndRecoverRowidReset: handles empty message table', () => {
   assert.equal(result.cutoffRowid, 1000, 'should preserve stored cutoff')
   db.close()
 })
+
+test('detectAndRecoverRowidReset: reset detected but no messages within 7-day window — safeCutoff falls back to maxRowid', () => {
+  // Scenario: Mac was unused >7 days and then VACUUM'd, resetting ROWIDs.
+  // All messages in the DB have timestamps older than 7 days, so the date-cutoff
+  // query returns null. safeCutoff must fall back to maxRowid (start scanning from
+  // the current end), NOT 0 — setting 0 would dump all historical messages to
+  // pugs-sales, which is a client-comms error and cloud noise.
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (
+    ROWID INTEGER PRIMARY KEY,
+    guid TEXT,
+    text TEXT,
+    date REAL
+  )`)
+  // Apple nanoseconds for 2020-01-01: always >7 days older than the test runner's
+  // clock, so the 7-day cutoff query will return null for all of these rows.
+  const APPLE_NS_2020 = 599529600000000000
+  for (let i = 1; i <= 5; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`old-${i}`, `text ${i}`, APPLE_NS_2020)
+  }
+  // stored lastRowid (200000) >> maxRowid (5) + ROWID_RESET_THRESHOLD (100000)
+  const result = detectAndRecoverRowidReset(db, 200000)
+  assert.equal(result.detected, true, 'reset must be detected')
+  assert.equal(result.cutoffRowid, 5, 'safeCutoff must be maxRowid when no recent messages — prevents old-history dump')
+  assert.ok(result.reason && result.reason.includes('ROWID reset'), 'reason must mention reset')
+  db.close()
+})
