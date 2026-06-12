@@ -458,6 +458,19 @@ async function main() {
   // dumping years of history in one request.
   let snapshotPath
   let db
+  // process.exit() bypasses finally blocks, so a snapshot (full chat.db copy,
+  // potentially hundreds of MB) would be left in /tmp every time the webhook or
+  // state-save fails. With launchd restarting every 5 min, a sustained outage
+  // could fill the disk. Register a once-exit handler so cleanup runs regardless
+  // of whether the process exits via normal return or process.exit().
+  let snapshotCleaned = false
+  const cleanupOnExit = () => {
+    if (snapshotCleaned) return
+    snapshotCleaned = true
+    try { if (db) db.close() } catch {}
+    if (snapshotPath) cleanupSnapshot(snapshotPath)
+  }
+  process.once('exit', cleanupOnExit)
   try {
     snapshotPath = snapshotDb()
     db = new Database(snapshotPath, { readonly: true })
@@ -604,6 +617,7 @@ async function main() {
     }
     } // end else (rows.length > 0)
   } finally {
+    snapshotCleaned = true  // prevent exit handler from double-running
     if (db) db.close()
     if (snapshotPath) cleanupSnapshot(snapshotPath)
   }
