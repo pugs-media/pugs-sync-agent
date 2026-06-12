@@ -154,6 +154,44 @@ test('syncContacts: still sends contacts from readable books when one book is co
   assert.equal(capturedBody.emails.length, 1)
 })
 
+// ── syncContacts: snapshot cleanup when POST fails ───────────────────────────
+// When postContactsPayload exhausts all retries, syncContacts must throw AND
+// clean up every AddressBook snapshot it created. Without the finally block,
+// each failed contacts sync (e.g. cloud down for an hour) leaks a temp file
+// (~few MB). With launchd running contacts sync hourly, 24h of cloud outage
+// = 24 leaked copies of the address book → disk fill on Connor's Mac.
+
+test('syncContacts: cleans up address book snapshots when postContactsPayload throws', async () => {
+  const goodFile = path.join(dir, 'AddressBook-v22.abcddb')
+  const goodDb = makeAddressBook(goodFile)
+  addContact(goodDb, 1, { first: 'Lead', last: 'Acme', phone: '+1 (415) 555-0100' })
+  goodDb.close()
+
+  const tmpDir = os.tmpdir()
+  const beforeFiles = new Set(fs.readdirSync(tmpDir).filter(f => f.startsWith('pugs-ab-')))
+
+  let threw = false
+  try {
+    await syncContacts({
+      webhookBase: 'https://example.pugs.media',
+      secret: 'test-secret',
+      scannerId: '',
+      _findAddressBooks: () => [goodFile],
+      _fetch: async () => { throw new Error('simulated cloud outage') },
+      _delay: async () => {},
+      _timeoutMs: 100,
+    })
+  } catch (e) {
+    threw = true
+  }
+  assert.ok(threw, 'syncContacts must throw when POST exhausts all retries')
+
+  // Verify no pugs-ab-* temp files remain from this call
+  const afterFiles = new Set(fs.readdirSync(tmpDir).filter(f => f.startsWith('pugs-ab-')))
+  const leaked = [...afterFiles].filter(f => !beforeFiles.has(f))
+  assert.equal(leaked.length, 0, `finally block must clean up snapshots — leaked: ${leaked.join(', ')}`)
+})
+
 // ── dedupeContacts (pure) ────────────────────────────────────────────────────
 
 test('dedupeContacts: keys phones by last 10 digits and emails by lowercased form', () => {
