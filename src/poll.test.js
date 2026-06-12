@@ -1054,3 +1054,51 @@ test('processBatch: journal mark failure is caught and reported as failed (preve
   assert.equal(reported[0].payload.status, 'failed', 'must report as failed')
   assert.ok(reported[0].payload.error.includes('journal mark failed'), 'error must mention journal failure')
 })
+
+// ── loop health reporting ──────────────────────────────────────────────────────
+// When fetchPendingBatch exhausts retries, pollOnce returns { fetchError }.
+// The loop must surface this as health='error' so the cloud sees an unhealthy
+// poller rather than a healthy one with 0 items — the two are indistinguishable
+// without this fix, masking a stalled outbound queue as a quiet queue.
+
+test('loop: reports health=error when pollOnce returns fetchError (queue unreachable)', async () => {
+  let shutDown = false
+  const healthCalls = []
+  await loop({
+    _pollOnce: async () => { shutDown = true; return { itemCount: 0, fetchError: 'connect ECONNREFUSED' } },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+    _reportHealth: (service, status, opts) => { healthCalls.push({ service, status, opts }) },
+  })
+  assert.equal(healthCalls.length, 1, 'exactly one health call per cycle')
+  assert.equal(healthCalls[0].service, 'poller')
+  assert.equal(healthCalls[0].status, 'error', 'fetch failure must surface as error, not ok')
+  assert.ok(healthCalls[0].opts.errorMessage.includes('ECONNREFUSED'), 'error message must be propagated')
+})
+
+test('loop: reports health=ok with itemCount on successful poll', async () => {
+  let shutDown = false
+  const healthCalls = []
+  await loop({
+    _pollOnce: async () => { shutDown = true; return { itemCount: 4 } },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+    _reportHealth: (service, status, opts) => { healthCalls.push({ service, status, opts }) },
+  })
+  assert.equal(healthCalls.length, 1, 'exactly one health call per cycle')
+  assert.equal(healthCalls[0].status, 'ok')
+  assert.equal(healthCalls[0].opts.itemCount, 4, 'itemCount must be forwarded from pollOnce result')
+})
+
+test('loop: reports health=ok with itemCount=0 on empty queue (no fetchError)', async () => {
+  let shutDown = false
+  const healthCalls = []
+  await loop({
+    _pollOnce: async () => { shutDown = true; return { itemCount: 0 } },
+    _delay: async () => {},
+    _isShuttingDown: () => shutDown,
+    _reportHealth: (service, status, opts) => { healthCalls.push({ service, status, opts }) },
+  })
+  assert.equal(healthCalls[0].status, 'ok', 'empty queue (no fetchError) must be ok, not error')
+  assert.equal(healthCalls[0].opts.itemCount, 0)
+})
