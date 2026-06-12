@@ -519,6 +519,22 @@ async function main() {
       }
       // Fall through to contacts sync — the hourly cadence must fire even
       // on quiet runs with no new messages so address-book renames stay current.
+    } else if (rows.length > 0 && dedupedRows.length === 0) {
+      // All fetched rows were filtered by GUID dedup (already sent in a prior run).
+      // This happens after ROWID reset recovery: the scanner falls back to a 7-day
+      // window, but those messages' GUIDs are already in sent_guids. Without
+      // advancing the cursor here, the scanner re-reads the same batch every 5
+      // minutes and never reaches messages at higher ROWIDs — a permanent stall.
+      const lastRowid = rows[rows.length - 1].rowid
+      console.log(`All ${rows.length} rows were GUID-deduped (already sent) — advancing cursor to ROWID ${lastRowid} to unblock new messages`)
+      try {
+        saveState(STATE_PATH, { ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
+      } catch (e) {
+        const msg = `State save failed after all-GUID-dedup cursor advance: ${e.message}`
+        console.error(msg)
+        await reportHealth('scanner', 'error', { errorMessage: msg })
+        process.exit(3)
+      }
     } else if (dedupedRows.length > 0) {
 
     // Row -> cloud payload mapping lives in ./payload.js (pure + unit-tested) so
