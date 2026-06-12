@@ -303,7 +303,7 @@ async function pollOnce() {
     items = await fetchPendingBatch()
   } catch (e) {
     log('poll fetch error:', e.message || e)
-    return { itemCount: 0 }
+    return { itemCount: 0, fetchError: e.message || String(e) }
   }
   if (items.length === 0) return { itemCount: 0 }
 
@@ -331,12 +331,13 @@ let shuttingDown = false
  * Main polling loop. Extracted with injectable deps so tests can drive it
  * without live network calls or module-level state pollution.
  *
- * @param {{ _pollOnce?, _delay?, _isShuttingDown? }} deps
+ * @param {{ _pollOnce?, _delay?, _isShuttingDown?, _reportHealth? }} deps
  */
 async function loop({
   _pollOnce = pollOnce,
   _delay = (ms) => new Promise(r => setTimeout(r, ms)),
   _isShuttingDown = () => shuttingDown,
+  _reportHealth = reportHealth,
 } = {}) {
   // First tick immediately, then on interval.
   for (;;) {
@@ -344,12 +345,18 @@ async function loop({
     try {
       const result = await _pollOnce()
       const durationMs = Date.now() - startMs
-      const itemCount = result?.itemCount || 0
-      reportHealth('poller', 'ok', { itemCount, durationMs })
+      if (result?.fetchError) {
+        // fetchPendingBatch exhausted retries — queue unreachable. Surface as
+        // error so the cloud health dashboard doesn't show a silent 0-item run.
+        _reportHealth('poller', 'error', { errorMessage: result.fetchError, durationMs })
+      } else {
+        const itemCount = result?.itemCount || 0
+        _reportHealth('poller', 'ok', { itemCount, durationMs })
+      }
     } catch (e) {
       const durationMs = Date.now() - startMs
       log('poll cycle error (will retry):', e.message || e)
-      reportHealth('poller', 'error', { errorMessage: e.message, durationMs })
+      _reportHealth('poller', 'error', { errorMessage: e.message, durationMs })
     }
     if (_isShuttingDown()) return
     await _delay(POLL_INTERVAL_MS)
