@@ -8,7 +8,7 @@
     "scan": "node src/scan.js",
     "send-listener": "node src/send.js",
     "install-agent": "bash install.sh",
-    "test": "node --test \"src/**/*.test.js\""
+    "test": "node --max-old-space-size=2048 --test \"src/**/*.test.js\""
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
