@@ -79,6 +79,27 @@ test('cleanupSnapshot: removes the snapshot and every sidecar', () => {
   assert.equal(fs.existsSync(dest + '-shm'), false)
 })
 
+test('snapshotSqlite: tolerates ENOENT on -wal sidecar copy (checkpoint race — WAL folded into main before our copy)', (t) => {
+  // Simulate the TOCTOU race: existsSync returns true but copyFileSync throws ENOENT
+  // because Messages.app completed a WAL checkpoint in the window between the two calls.
+  // The main copy is already complete in this case; snapshotSqlite must NOT crash.
+  const src = write('chat.db', 'MAIN')
+  write('chat.db-wal', 'WAL')
+  const dest = path.join(dir, 'snap.db')
+
+  const realCopyFileSync = fs.copyFileSync.bind(fs)
+  t.mock.method(fs, 'copyFileSync', (s, d) => {
+    if (s.endsWith('-wal')) throw Object.assign(new Error(`ENOENT: no such file or directory, copyfile '${s}' -> '${d}'`), { code: 'ENOENT' })
+    realCopyFileSync(s, d)
+  })
+
+  const written = snapshotSqlite(src, dest)
+
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'MAIN', 'main copy must succeed')
+  assert.deepEqual(written, [dest], 'only main file in written list when sidecar vanishes')
+  assert.equal(fs.existsSync(dest + '-wal'), false, 'no partial sidecar left on disk')
+})
+
 test('cleanupSnapshot: never throws when files are already gone', () => {
   const dest = path.join(dir, 'does-not-exist.db')
   assert.doesNotThrow(() => cleanupSnapshot(dest))

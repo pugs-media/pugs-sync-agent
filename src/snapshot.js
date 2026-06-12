@@ -42,8 +42,18 @@ function snapshotSqlite(srcPath, destPath) {
     const srcSidecar = srcPath + suffix
     if (fs.existsSync(srcSidecar)) {
       const destSidecar = destPath + suffix
-      fs.copyFileSync(srcSidecar, destSidecar)
-      written.push(destSidecar)
+      try {
+        fs.copyFileSync(srcSidecar, destSidecar)
+        written.push(destSidecar)
+      } catch (e) {
+        if (e.code === 'ENOENT') {
+          // WAL sidecar vanished between existsSync and copyFileSync — Messages.app
+          // completed a checkpoint, folding the WAL into the main file. The main copy
+          // we already made is complete and authoritative; skip the sidecar.
+        } else {
+          throw e
+        }
+      }
     }
   }
   return written
