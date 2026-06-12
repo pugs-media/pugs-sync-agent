@@ -25,6 +25,12 @@ LOG_PREFIX="$(date -u +%Y-%m-%dT%H:%M:%SZ) update.sh:"
 
 cd "$AGENT_ROOT" || { echo "$LOG_PREFIX cannot cd $AGENT_ROOT"; exit 1; }
 
+# Rotate logs to prevent unbounded growth and disk fill
+# Default: rotate when logs exceed 50MB, keep 5 rotated archives
+if [ -x "$AGENT_ROOT/rotate-logs.sh" ]; then
+  "$AGENT_ROOT/rotate-logs.sh" 50 5 >/dev/null 2>&1 || true
+fi
+
 # ── Watchdog: self-heal a dead scanner ─────────────────────────────────────
 # Scanner runs every 5min on StartInterval. If scanner.log hasn't been
 # touched in >30min, something fucked up (launchd gave up after crash-loop,
