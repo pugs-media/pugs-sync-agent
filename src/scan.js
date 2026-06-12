@@ -535,7 +535,9 @@ async function main() {
       try {
         await sendHeartbeat()
       } catch (e) {
-        console.error(`Heartbeat failed after retries: ${e.message}`)
+        const msg = `Heartbeat failed after retries: ${e.message}`
+        console.error(msg)
+        await reportHealth('scanner', 'error', { errorMessage: msg })
         process.exit(4)
       }
       // Fall through to contacts sync — the hourly cadence must fire even
@@ -590,7 +592,9 @@ async function main() {
     try {
       webhookResp = await postToWebhook({ messages: filteredPayload })
     } catch (e) {
-      console.error(`Webhook failed: ${e.message}`)
+      const msg = `Webhook POST failed after retries: ${e.message}`
+      console.error(msg)
+      await reportHealth('scanner', 'error', { errorMessage: msg })
       process.exit(4)
     }
     const text = await webhookResp.text()

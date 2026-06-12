@@ -35,3 +35,34 @@ test('state-save guard: catch and report saveState errors (prevents silent dupli
   assert.ok(scanCode.includes('process.exit(3)'),
     'scan.js must exit on state-save failure to prevent silent duplicate-send risk')
 })
+
+test('health-before-exit(4): heartbeat failure reports health=error before exiting (not a silent stall)', () => {
+  // Without a health report before process.exit(4), a persistent heartbeat failure looks
+  // like a silent stall on the dashboard — indistinguishable from a hung scanner.
+  // The cloud health endpoint is best-effort (swallows errors if the cloud is down too),
+  // so adding reportHealth here costs nothing on a full-cloud-outage and adds visibility
+  // when only the webhook route is broken while the health route still responds.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  // The heartbeat-failure catch block must include both a reportHealth call and exit(4).
+  assert.ok(
+    scanCode.includes('Heartbeat failed after retries') &&
+    scanCode.includes("reportHealth('scanner', 'error'") &&
+    scanCode.includes('process.exit(4)'),
+    'scan.js must call reportHealth(error) before process.exit(4) on heartbeat failure'
+  )
+})
+
+test('health-before-exit(4): webhook failure reports health=error before exiting (not a silent stall)', () => {
+  // Same pattern as heartbeat: a webhook failure that exits without a health report
+  // leaves the cloud dashboard showing the last ok heartbeat, making a "webhook all retries
+  // exhausted" look identical to "scanner is quietly idle". The health report disambiguates.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('Webhook POST failed after retries') &&
+    scanCode.includes("reportHealth('scanner', 'error'") &&
+    scanCode.includes('process.exit(4)'),
+    'scan.js must call reportHealth(error) before process.exit(4) on webhook failure'
+  )
+})
