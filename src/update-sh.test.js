@@ -141,6 +141,37 @@ test('update.sh: watchdog grep includes GUID-deduped as a success indicator', ()
   )
 })
 
+// ── watchdog log-file existence guard ────────────────────────────────────────
+
+test('update.sh: watchdog skips entirely when scanner.log does not exist (prevents cascade restarts after log rotation)', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // rotate-logs.sh MOVES scanner.log to scanner.log.1 when it exceeds the size
+  // threshold — after rotation the file is gone, not truncated. On the same
+  // update.sh run the watchdog must skip rather than fire.
+  //
+  // Without the [ -f ] guard, `stat` on the missing file falls back to mtime=0,
+  // so age = (now - 0) ≈ 54 years, which always exceeds WATCHDOG_THRESHOLD_SEC.
+  // That would trigger panic-restart on EVERY update.sh cycle until the scanner
+  // creates a new scanner.log — cascading service restarts every 10 minutes and
+  // a stream of false-alarm beacons to Charlie.
+  assert.ok(
+    src.includes('[ -f "$SCANNER_LOG" ]'),
+    'watchdog must guard on scanner.log existence — log rotation moves the file away; ' +
+    'missing guard causes stat mtime=0 → age≈54yr → panic-restart on every update cycle'
+  )
+  // Verify the watchdog block is wholly nested inside that guard, not just that
+  // the guard string appears somewhere.
+  // WATCHDOG_THRESHOLD_SEC is defined as a constant before the guard — use the
+  // reference ($WATCHDOG_THRESHOLD_SEC) which appears inside the if-block.
+  const guardIdx     = src.indexOf('[ -f "$SCANNER_LOG" ]')
+  const watchdogIdx  = src.indexOf('watchdog_fire=')
+  const thresholdIdx = src.indexOf('$WATCHDOG_THRESHOLD_SEC')
+  assert.ok(
+    guardIdx < watchdogIdx && guardIdx < thresholdIdx,
+    'watchdog_fire assignment and threshold reference must come after the [ -f ] guard'
+  )
+})
+
 // ── watchdog beacon ──────────────────────────────────────────────────────────
 
 test('update.sh: watchdog beacon body uses $watchdog_reason (not hardcoded "scanner.log stale")', () => {
