@@ -1583,3 +1583,69 @@ test('detectAndRecoverRowidReset: secondary stall check — does NOT fire when c
   assert.equal(result.cutoffRowid, 100, 'cursor must be preserved in normal caught-up state')
   db.close()
 })
+
+// ── injectable _now: exact 7-day window boundary tests ───────────────────────
+// These tests use _now to pin the clock, making the 7-day window deterministic.
+// Without injectable time the boundary can only be tested with "obviously recent"
+// data (1h ago), so a unit typo like 8640000 instead of 86400000 (10x shorter
+// window) would pass all prior tests. These tests catch exactly that class of bug.
+
+test('detectAndRecoverRowidReset: _now injection — message 1ms within 7-day window triggers stall', () => {
+  // Pin _now to a fixed value. A message just within 7 days must be found by the
+  // secondary stall check and trigger recovery — cutoffAppleNs = (now - 7d) in ns.
+  const now = 1_750_000_000_000  // fixed Unix ms
+  const sevenDaysMs = 7 * 86400000
+  // Timestamp 1ms before the 7-day cutoff = within the window.
+  const withinWindowMs = now - sevenDaysMs + 1
+  const withinWindowAppleNs = (withinWindowMs - 978307200000) * 1e6
+
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('msg-1', 'hello', withinWindowAppleNs)
+
+  // cursor=999 > maxRowid=1, message is within 7 days → secondary stall detected
+  const result = detectAndRecoverRowidReset(db, 999, { _now: () => now })
+  assert.equal(result.detected, true, 'stall must be detected: recent message is below stuck cursor')
+  assert.ok(result.reason.includes('stall'), `reason must mention stall; got: ${result.reason}`)
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: _now injection — message 1ms beyond 7-day window does NOT trigger stall', () => {
+  // A message exactly 1ms older than the 7-day cutoff must NOT satisfy date >= cutoffAppleNs.
+  const now = 1_750_000_000_000
+  const sevenDaysMs = 7 * 86400000
+  // Timestamp 1ms beyond the window = NOT within 7 days.
+  const beyondWindowMs = now - sevenDaysMs - 1
+  const beyondWindowAppleNs = (beyondWindowMs - 978307200000) * 1e6
+
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('msg-1', 'hello', beyondWindowAppleNs)
+
+  // cursor=999 > maxRowid=1, but the only message is outside the 7-day window
+  const result = detectAndRecoverRowidReset(db, 999, { _now: () => now })
+  assert.equal(result.detected, false, 'stall must NOT be detected: no recent messages below cursor')
+  assert.equal(result.cutoffRowid, 999, 'cursor must be preserved when no recent stall evidence')
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: _now injection — safeCutoff is first in-window ROWID minus 1', () => {
+  // After stall detection, safeCutoff must be (first 7-day message ROWID - 1) so
+  // the next scan re-reads that message and doesn't skip it.
+  const now = 1_750_000_000_000
+  const sevenDaysMs = 7 * 86400000
+  const withinWindowAppleNs = (now - sevenDaysMs + 60_000 - 978307200000) * 1e6  // 1min within window
+
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+  // Insert 3 messages; they get ROWIDs 1, 2, 3 in insert order.
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('msg-1', 'a', withinWindowAppleNs)
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('msg-2', 'b', withinWindowAppleNs)
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('msg-3', 'c', withinWindowAppleNs)
+
+  const result = detectAndRecoverRowidReset(db, 999, { _now: () => now })
+  assert.equal(result.detected, true, 'stall must be detected')
+  // First in-window ROWID = 1; safeCutoff = 0 so next query ROWID > 0 catches msg-1.
+  assert.equal(result.cutoffRowid, 0, 'safeCutoff must be first-in-window ROWID (1) minus 1 = 0')
+  db.close()
+})
