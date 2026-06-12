@@ -215,8 +215,16 @@ function parseProspectHandles(j) {
   if (j.emails !== undefined && !Array.isArray(j.emails)) {
     throw new TypeError(`prospect-handles: emails must be an array, got ${j.emails === null ? 'null' : typeof j.emails}`)
   }
+  // Normalize phones to bare 10-digit keys so they match the same normalization
+  // makeHandleAllowed applies to incoming chat.db handles. Without this, a phone
+  // returned by the API in E.164 (+14155550100) or any other format would never
+  // match a normalized handle (4155550100), silently filtering the message as
+  // "not-prospect" — a lead loss. Non-numeric or too-short entries are dropped.
+  const normalizedPhones = (j.phones ?? [])
+    .map(p => (typeof p === 'string' ? p.replace(/\D/g, '').slice(-10) : ''))
+    .filter(p => p.length === 10)
   return {
-    phones: new Set(j.phones ?? []),
+    phones: new Set(normalizedPhones),
     emails: new Set((j.emails ?? []).map(e => e.toLowerCase())),
     total:  (j.count_phones || 0) + (j.count_emails || 0),
   }
