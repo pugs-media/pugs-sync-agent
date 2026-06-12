@@ -1510,3 +1510,76 @@ test('detectAndRecoverRowidReset: reset detected but no messages within 7-day wi
   assert.ok(result.reason && result.reason.includes('ROWID reset'), 'reason must mention reset')
   db.close()
 })
+
+// ── secondary stall detection (modest VACUUM / macOS rebuild gap < 100K) ────────
+// The primary threshold (100K) misses macOS upgrades or VACUUMs that compress
+// the DB by less than 100K rows. After such an event, new messages get ROWIDs
+// starting from current_max+1 (below the stored cursor), so the scanner's
+// "WHERE ROWID > lastRowid" query silently returns nothing — every lead is missed
+// until 100K new messages push the sequence past lastRowid (months on a sales tool).
+//
+// The secondary check detects this: if lastRowid > maxRowid AND a message received
+// in the last 7 days has ROWID < lastRowid, the sequence was reset. New messages
+// will start at maxRowid+1 (below cursor) and would be permanently missed without
+// the recovery. The 7-day window matches the recovery window so no scope creep.
+
+test('detectAndRecoverRowidReset: secondary stall check — detects modest VACUUM where recent message exists below cursor', () => {
+  // Simulates a modest VACUUM (< 100K compression): 51 messages, cursor at 80001.
+  // Gap = 80001 - 51 = 79950 < 100K → primary check misses it.
+  // One message has a recent timestamp (within 7 days) and ROWID 51 < 80001 →
+  // secondary check detects the stall and triggers 7-day recovery.
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+
+  const APPLE_NS_2020 = 599529600000000000  // 2020-01-01 — older than 7 days
+  for (let i = 1; i <= 50; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`old-${i}`, `text ${i}`, APPLE_NS_2020)
+  }
+  // One recent message (within last 7 days) at ROWID 51 — below the cursor
+  const recentAppleNs = (Date.now() - 978307200000) * 1e6 - 3600e9  // ~1 hour ago
+  db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run('recent-1', 'recent', recentAppleNs)
+
+  // maxRowid = 51, lastRowid = 80001, gap = ~80K < 100K → primary misses, secondary fires
+  const result = detectAndRecoverRowidReset(db, 80001)
+  assert.equal(result.detected, true, 'secondary check must detect stall when recent message is below cursor')
+  assert.ok(result.reason && result.reason.includes('stall'), `reason must mention stall; got: ${result.reason}`)
+  assert.ok(result.cutoffRowid < 80001, 'recovery cutoff must be below the stuck cursor')
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: secondary stall check — does NOT fire when cursor is ahead of max but no recent messages', () => {
+  // Cursor ahead of max (could be from deletions) but all messages are old (> 7 days).
+  // Without recent messages below the cursor there is no evidence of a VACUUM stall —
+  // could just be a quiet Mac with no activity in the last week.
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+
+  const APPLE_NS_2020 = 599529600000000000  // older than 7 days
+  for (let i = 1; i <= 50; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`old-${i}`, `text ${i}`, APPLE_NS_2020)
+  }
+
+  // maxRowid = 50, lastRowid = 60 — slightly ahead, but no recent messages below cursor
+  const result = detectAndRecoverRowidReset(db, 60)
+  assert.equal(result.detected, false, 'must NOT detect stall when no recent messages exist below cursor')
+  assert.equal(result.cutoffRowid, 60, 'cursor must be preserved when no stall evidence')
+  db.close()
+})
+
+test('detectAndRecoverRowidReset: secondary stall check — does NOT fire when cursor equals max (normal caught-up state)', () => {
+  // In normal "caught up" operation lastRowid == maxRowid (strictly equal).
+  // The secondary check condition `lastRowid > maxRowid` is false — must not fire.
+  const db = new Database(':memory:')
+  db.exec(`CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, date REAL)`)
+
+  const recentAppleNs = (Date.now() - 978307200000) * 1e6 - 3600e9  // ~1 hour ago
+  for (let i = 1; i <= 100; i++) {
+    db.prepare('INSERT INTO message (guid, text, date) VALUES (?, ?, ?)').run(`msg-${i}`, `text ${i}`, recentAppleNs)
+  }
+
+  // lastRowid = 100 = maxRowid — scanner is caught up, no gap
+  const result = detectAndRecoverRowidReset(db, 100)
+  assert.equal(result.detected, false, 'must not detect stall when cursor equals max — this is normal operation')
+  assert.equal(result.cutoffRowid, 100, 'cursor must be preserved in normal caught-up state')
+  db.close()
+})

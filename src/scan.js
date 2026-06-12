@@ -339,18 +339,36 @@ function detectAndRecoverRowidReset(db, lastRowid) {
   // If max ROWID is 0 (empty table), no new messages — no reset needed, preserve cutoff
   if (maxRowid === 0) return { cutoffRowid: lastRowid, detected: false, reason: null }
 
-  // Large gap (>100K) suggests reset: stored cursor is ahead of current max.
-  // Safe fallback: start from the most recent 7 days of messages to prevent
-  // dump of pre-reset history while still catching recent messages.
+  const cutoffMs = Date.now() - 7 * 86400000  // 7 days back
+  const cutoffAppleNs = (cutoffMs - 978307200000) * 1e6
+
+  // Primary check: large gap (>100K) between stored cursor and current max —
+  // unmistakable major reset (macOS full rebuild, multi-year VACUUM).
   const ROWID_RESET_THRESHOLD = 100_000
-  if (lastRowid > maxRowid + ROWID_RESET_THRESHOLD) {
-    const cutoffMs = Date.now() - 7 * 86400000  // 7 days back
-    const cutoffAppleNs = (cutoffMs - 978307200000) * 1e6
+  const isReset = lastRowid > maxRowid + ROWID_RESET_THRESHOLD
+
+  // Secondary stall check: cursor is ahead of current max (any gap) AND a message
+  // received in the last 7 days has ROWID below the cursor. In normal operation,
+  // all recent messages would have ROWIDs above lastRowid (we processed them and
+  // advanced the cursor). After a modest VACUUM or macOS rebuild that compresses
+  // the DB by < 100K rows, recent messages are renumbered below the old cursor
+  // and new messages start at maxRowid+1 — meaning every new lead is silently
+  // missed until 100K new messages push the sequence past lastRowid (months on a
+  // sales tool). Checking for recent messages below the cursor catches this class
+  // of stall that the primary threshold alone misses.
+  const isStall = !isReset && lastRowid > maxRowid && !!db.prepare(
+    'SELECT ROWID FROM message WHERE date >= ? AND ROWID < ? LIMIT 1'
+  ).get(cutoffAppleNs, lastRowid)
+
+  if (isReset || isStall) {
     const row = db.prepare(
       'SELECT ROWID FROM message WHERE date >= ? ORDER BY ROWID ASC LIMIT 1'
     ).get(cutoffAppleNs)
     const safeCutoff = row ? row.ROWID - 1 : maxRowid
-    return { cutoffRowid: safeCutoff, detected: true, reason: `ROWID reset detected (was ${lastRowid}, now max ${maxRowid})` }
+    const reason = isReset
+      ? `ROWID reset detected (was ${lastRowid}, now max ${maxRowid})`
+      : `ROWID stall detected (cursor ${lastRowid} > max ${maxRowid})`
+    return { cutoffRowid: safeCutoff, detected: true, reason }
   }
 
   return { cutoffRowid: lastRowid, detected: false, reason: null }
