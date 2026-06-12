@@ -328,9 +328,11 @@ function assertChatDbSchema(db) {
  *
  * @param {import('better-sqlite3').Database} db  open snapshot DB
  * @param {number} lastRowid   stored highwater mark
+ * @param {object} [opts]
+ * @param {() => number} [opts._now]  injectable clock — defaults to Date.now()
  * @returns {object}
  */
-function detectAndRecoverRowidReset(db, lastRowid) {
+function detectAndRecoverRowidReset(db, lastRowid, { _now = Date.now } = {}) {
   if (lastRowid === 0) return { cutoffRowid: 0, detected: false, reason: null }
 
   const maxRow = db.prepare('SELECT MAX(ROWID) AS max_id FROM message').get()
@@ -339,7 +341,7 @@ function detectAndRecoverRowidReset(db, lastRowid) {
   // If max ROWID is 0 (empty table), no new messages — no reset needed, preserve cutoff
   if (maxRowid === 0) return { cutoffRowid: lastRowid, detected: false, reason: null }
 
-  const cutoffMs = Date.now() - 7 * 86400000  // 7 days back
+  const cutoffMs = _now() - 7 * 86400000  // 7 days back
   const cutoffAppleNs = (cutoffMs - 978307200000) * 1e6
 
   // Primary check: large gap (>100K) between stored cursor and current max —
