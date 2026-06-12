@@ -124,3 +124,23 @@ test('update.sh: git fetch timeout failure is logged', () => {
     'timeout kill of git fetch must be logged'
   )
 })
+
+// ── watchdog beacon ──────────────────────────────────────────────────────────
+
+test('update.sh: watchdog beacon body uses $watchdog_reason (not hardcoded "scanner.log stale")', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // The watchdog fires for two distinct reasons:
+  //   (1) scanner.log mtime stale — launchd gave up scheduling
+  //   (2) scanner.log fresh but no "Webhook OK" in last 200 lines — crash-loop
+  // If the beacon body hardcodes "scanner.log stale", Charlie sees the wrong
+  // diagnostic for reason (2) and wastes time investigating the wrong failure mode.
+  assert.ok(
+    !src.includes('"reason":"scanner.log stale"'),
+    'beacon body must not hardcode the reason string — use $watchdog_reason so both failure modes report accurately'
+  )
+  // In the shell script the JSON is embedded with escaped quotes: \"reason\":\"$watchdog_reason\"
+  assert.ok(
+    src.includes('\\"reason\\":\\"$watchdog_reason\\"'),
+    'beacon body must use $watchdog_reason so the actual trigger is sent to pugs-sales'
+  )
+})

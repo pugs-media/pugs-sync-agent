@@ -90,7 +90,7 @@ if [ -f "$SCANNER_LOG" ]; then
           -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
           -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
           -H "content-type: application/json" \
-          -d "{\"reason\":\"scanner.log stale\",\"age_seconds\":$age}" \
+          -d "{\"reason\":\"$watchdog_reason\",\"age_seconds\":$age}" \
           >/dev/null 2>&1 \
           && echo "$LOG_PREFIX WATCHDOG beacon sent to pugs-sales" \
           || echo "$LOG_PREFIX WATCHDOG beacon failed (non-fatal)"
