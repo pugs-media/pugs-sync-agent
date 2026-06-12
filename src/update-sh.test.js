@@ -125,6 +125,22 @@ test('update.sh: git fetch timeout failure is logged', () => {
   )
 })
 
+// ── watchdog success-line patterns ───────────────────────────────────────────
+
+test('update.sh: watchdog grep includes GUID-deduped as a success indicator', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // After a ROWID reset, the scanner advances the cursor through an already-sent
+  // backlog. Each run logs "All N rows were GUID-deduped (already sent) — advancing
+  // cursor…" but prints none of Webhook OK / sending heartbeat / Posting N messages.
+  // Without GUID-deduped in the grep, the watchdog fires against a healthy scanner
+  // if that backlog takes >30 min to clear (>1000 messages in the 7-day fallback
+  // window). Adding it prevents a spurious panic-restart + false alert to Charlie.
+  assert.ok(
+    src.includes('GUID-deduped'),
+    'watchdog grep must include GUID-deduped so post-ROWID-reset cursor advances are recognised as healthy'
+  )
+})
+
 // ── watchdog beacon ──────────────────────────────────────────────────────────
 
 test('update.sh: watchdog beacon body uses $watchdog_reason (not hardcoded "scanner.log stale")', () => {
