@@ -249,6 +249,31 @@ test('parseProspectHandles: accepts valid phones and emails arrays', () => {
   assert.equal(result.total, 3)
 })
 
+test('parseProspectHandles: normalizes phones to bare 10-digit keys (E.164 and variants)', () => {
+  // makeHandleAllowed strips non-digits and takes the last 10 chars from incoming
+  // chat.db handles. The allowlist must use the same form or matching silently fails
+  // and prospect inbounds are dropped as "not-prospect" — a lead loss.
+  const result = parseProspectHandles({
+    phones: ['+14155550100', '(415) 555-0100', '14155550100', '1-415-555-0100'],
+    emails: [],
+    count_phones: 4,
+    count_emails: 0,
+  })
+  // All four formats normalize to the same 10-digit key — should collapse to 1 entry.
+  assert.equal(result.phones.size, 1, 'all forms should collapse to one normalized entry')
+  assert.ok(result.phones.has('4155550100'), 'bare 10-digit key must be present')
+})
+
+test('parseProspectHandles: drops phones that are too short after normalization', () => {
+  const result = parseProspectHandles({
+    phones: ['555-0100', ''],   // 7 digits → dropped; empty → dropped
+    emails: [],
+    count_phones: 2,
+    count_emails: 0,
+  })
+  assert.equal(result.phones.size, 0, 'short/empty phones must be dropped, not stored as partial keys')
+})
+
 test('parseProspectHandles: treats absent phones/emails as empty sets', () => {
   const result = parseProspectHandles({ count_phones: 0, count_emails: 0 })
   assert.equal(result.phones.size, 0)
