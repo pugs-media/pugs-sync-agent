@@ -10,7 +10,7 @@ const fs       = require('fs')
 const path     = require('path')
 const os       = require('os')
 const Database = require('better-sqlite3')
-const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, fetchOrCachedProspects, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -1648,4 +1648,126 @@ test('detectAndRecoverRowidReset: _now injection — safeCutoff is first in-wind
   // First in-window ROWID = 1; safeCutoff = 0 so next query ROWID > 0 catches msg-1.
   assert.equal(result.cutoffRowid, 0, 'safeCutoff must be first-in-window ROWID (1) minus 1 = 0')
   db.close()
+})
+
+// ── fetchOrCachedProspects ────────────────────────────────────────────────────
+// The cache-fallback branch is the scanner's resilience mechanism during cloud
+// outages. A silent regression here (wrong cache key, parse error) would cause
+// the scanner to halt on every outage instead of using cached data — a lead-loss
+// risk that was previously untestable inside main().
+
+let tmpCounter = 0
+function tmpStatePath() {
+  return path.join(os.tmpdir(), `foc-test-state-${process.pid}-${++tmpCounter}.json`)
+}
+
+test('fetchOrCachedProspects: returns fresh prospects and caches them in state.json on success', async () => {
+  const statePath = tmpStatePath()
+  const _fetch = async () => ({
+    ok: true,
+    json: async () => ({ phones: ['+14155550100'], emails: ['lead@example.com'], count_phones: 1, count_emails: 1 }),
+  })
+
+  const result = await fetchOrCachedProspects({
+    _fetch,
+    _delay:     NOOP_DELAY,
+    webhookUrl: 'https://example.pugs.media/api/import/imessage',
+    secret:     'test-secret',
+    scannerId:  '',
+    statePath,
+  })
+
+  // Returns a live prospects object
+  assert.ok(result.phones instanceof Set, 'phones should be a Set')
+  assert.ok(result.phones.has('4155550100'), 'phone should be normalized to 10-digit bare')
+  assert.ok(result.emails.has('lead@example.com'))
+
+  // Writes cached_prospects to state.json for use on future runs
+  const { loadState } = require('./state')
+  const saved = loadState(statePath)
+  assert.ok(saved.cached_prospects, 'cached_prospects must be written to state')
+  assert.ok(Array.isArray(saved.cached_prospects.phones), 'cached phones must be an array')
+  assert.ok(saved.cached_prospects.phones.includes('4155550100'), 'cached phone must be normalized')
+
+  fs.unlinkSync(statePath)
+})
+
+test('fetchOrCachedProspects: uses cached allowlist when cloud fetch fails and cache exists', async () => {
+  const statePath = tmpStatePath()
+  const { saveState } = require('./state')
+
+  // Pre-seed the state file with a cached allowlist
+  saveState(statePath, {
+    last_rowid: 42,
+    cached_prospects: { phones: ['6505551234'], emails: ['cached@example.com'] },
+  })
+
+  const _fetch = async () => { throw new Error('ECONNREFUSED') }
+
+  const result = await fetchOrCachedProspects({
+    _fetch,
+    _delay:     NOOP_DELAY,
+    webhookUrl: 'https://example.pugs.media/api/import/imessage',
+    secret:     'test-secret',
+    scannerId:  '',
+    statePath,
+  })
+
+  assert.ok(result.phones.has('6505551234'), 'cached phone must be in returned Set')
+  assert.ok(result.emails.has('cached@example.com'), 'cached email must be in returned Set')
+
+  // last_rowid must not have been clobbered (state merged, not overwritten)
+  const { loadState } = require('./state')
+  const saved = loadState(statePath)
+  assert.equal(saved.last_rowid, 42, 'last_rowid must survive the cache fallback path')
+
+  fs.unlinkSync(statePath)
+})
+
+test('fetchOrCachedProspects: throws when cloud fails and state has no cached_prospects', async () => {
+  const statePath = tmpStatePath()
+  // Empty state — no cached_prospects key
+  const { saveState } = require('./state')
+  saveState(statePath, { last_rowid: 0 })
+
+  const _fetch = async () => { throw new Error('network timeout') }
+
+  await assert.rejects(
+    () => fetchOrCachedProspects({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+      statePath,
+    }),
+    /no cache available/,
+    'must throw with "no cache available" when state has no cached_prospects',
+  )
+
+  fs.unlinkSync(statePath)
+})
+
+test('fetchOrCachedProspects: throws when cloud fails and cached_prospects is corrupt', async () => {
+  const statePath = tmpStatePath()
+  const { saveState } = require('./state')
+  // Store a malformed cached_prospects (phones is a string, not an array)
+  saveState(statePath, { last_rowid: 0, cached_prospects: { phones: 'NOT-AN-ARRAY', emails: [] } })
+
+  const _fetch = async () => { throw new Error('503 Service Unavailable') }
+
+  await assert.rejects(
+    () => fetchOrCachedProspects({
+      _fetch,
+      _delay:     NOOP_DELAY,
+      webhookUrl: 'https://example.pugs.media/api/import/imessage',
+      secret:     'test-secret',
+      scannerId:  '',
+      statePath,
+    }),
+    /cached allowlist is invalid/,
+    'must throw with "cached allowlist is invalid" when cached_prospects fails parseProspectHandles',
+  )
+
+  fs.unlinkSync(statePath)
 })

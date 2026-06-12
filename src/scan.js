@@ -136,6 +136,56 @@ function shouldSyncContacts(lastContactsAt, newDraftsThisRun, { now = Date.now()
   return { should: false, trigger: null }
 }
 
+/**
+ * Fetch the prospect handle allowlist from the cloud, falling back to the
+ * cached version in state.json if the cloud is temporarily unreachable.
+ *
+ * Returns a live prospects object { phones: Set, emails: Set, total } on
+ * success (either live or cached). Throws on permanent failure so the caller
+ * can exit(5) with a clear error.
+ *
+ * Extracted from main() so the cache-fallback branch is unit-testable without
+ * mocking the entire scan flow. Without this, a silent regression in the
+ * fallback path (wrong cache key, corrupt state read) would cause the scanner
+ * to halt on every cloud outage rather than use cached data — an undetected
+ * lead-loss risk.
+ */
+async function fetchOrCachedProspects({
+  webhookUrl = WEBHOOK_URL,
+  secret     = SECRET,
+  scannerId  = SCANNER_ID,
+  statePath  = STATE_PATH,
+  _fetch,
+  _delay,
+  _timeoutMs,
+} = {}) {
+  const fetchOpts = { webhookUrl, secret, scannerId }
+  if (_fetch     !== undefined) fetchOpts._fetch     = _fetch
+  if (_delay     !== undefined) fetchOpts._delay     = _delay
+  if (_timeoutMs !== undefined) fetchOpts._timeoutMs = _timeoutMs
+
+  try {
+    const prospects = await fetchProspectHandles(fetchOpts)
+    const stateForCache = loadState(statePath)
+    saveState(statePath, { ...stateForCache, cached_prospects: serializeProspects(prospects) })
+    return prospects
+  } catch (fetchErr) {
+    const stateForCache = loadState(statePath)
+    const cache = stateForCache.cached_prospects
+    if (cache) {
+      let prospects
+      try {
+        prospects = parseProspectHandles(cache)
+      } catch (cacheErr) {
+        throw new Error(`Failed to fetch prospect allowlist and cached allowlist is invalid — halting scan. fetch: ${fetchErr.message}; cache: ${cacheErr.message}`)
+      }
+      console.warn(`Could not reach prospect-handles endpoint (${fetchErr.message}) — using cached allowlist (${prospects.phones.size} phones + ${prospects.emails.size} emails)`)
+      return prospects
+    }
+    throw new Error(`Failed to fetch prospect allowlist — halting scan (no cache available). ${fetchErr.message}`)
+  }
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Main
 
@@ -448,33 +498,11 @@ async function main() {
   // at the scanner — server has the same check as belt+suspenders.
   let prospects
   try {
-    prospects = await fetchProspectHandles({ webhookUrl: WEBHOOK_URL, secret: SECRET, scannerId: SCANNER_ID })
+    prospects = await fetchOrCachedProspects()
     console.log(`Prospect allowlist: ${prospects.phones.size} phones + ${prospects.emails.size} emails (${prospects.total} total)`)
-    // Persist a fresh copy immediately so the next run can fall back to it if
-    // the cloud is temporarily unreachable. We load-then-merge to avoid
-    // clobbering last_rowid or last_contacts_at that may already be on disk.
-    const stateForCache = loadState(STATE_PATH)
-    saveState(STATE_PATH, { ...stateForCache, cached_prospects: serializeProspects(prospects) })
   } catch (e) {
-    // Cloud is down or unreachable — try the most-recently cached allowlist.
-    // A stale cache is far safer than halting all inbound ingest: the allowlist
-    // only ever grows (prospects are added, never removed mid-conversation), so
-    // a few-hours-old list risks at most a temporary gap in new-prospect detection,
-    // not leaking non-prospect messages (the cache is only used when fetch fails).
-    const stateForCache = loadState(STATE_PATH)
-    const cache = stateForCache.cached_prospects
-    if (cache) {
-      try {
-        prospects = parseProspectHandles(cache)
-        console.warn(`Could not reach prospect-handles endpoint (${e.message}) — using cached allowlist (${prospects.phones.size} phones + ${prospects.emails.size} emails)`)
-      } catch (cacheErr) {
-        console.error(`Failed to fetch prospect allowlist and cached allowlist is invalid — halting scan. fetch: ${e.message}; cache: ${cacheErr.message}`)
-        process.exit(5)
-      }
-    } else {
-      console.error(`Failed to fetch prospect allowlist — halting scan (no cache available). ${e.message}`)
-      process.exit(5)
-    }
+    console.error(e.message)
+    process.exit(5)
   }
 
   const state = loadState(STATE_PATH)
@@ -731,4 +759,4 @@ if (require.main === module) {
     })
 }
 
-module.exports = { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts }
+module.exports = { fetchProspectHandles, parseProspectHandles, fetchOrCachedProspects, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts }
