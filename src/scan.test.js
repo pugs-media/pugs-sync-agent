@@ -6,6 +6,9 @@ process.env.PUGS_SYNC_SECRET      = 'test-secret'
 
 const { test } = require('node:test')
 const assert   = require('node:assert/strict')
+const fs       = require('fs')
+const path     = require('path')
+const os       = require('os')
 const Database = require('better-sqlite3')
 const { fetchProspectHandles, parseProspectHandles, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts } = require('./scan')
 
@@ -603,6 +606,30 @@ test('sendHeartbeat: throws after all retries exhausted — so main() can exit n
     /webhook 503/,
   )
   assert.equal(calls, 3, 'should exhaust all 3 attempts')
+})
+
+// ── snapshot exit-handler cleanup ─────────────────────────────────────────────
+
+test('scan: snapshot is cleaned up when process.exit() is called inside the scan try block', async () => {
+  // process.exit() bypasses finally blocks. Without the process.once('exit', cleanupOnExit)
+  // handler, a 100-500 MB chat.db snapshot left in /tmp on every webhook failure
+  // would accumulate and could fill the disk within hours of a sustained outage.
+  const { execFile } = require('child_process')
+  const snap = path.join(os.tmpdir(), `scan-exit-cleanup-${Date.now()}.db`)
+
+  // Script mirrors scan.js's cleanup handler pattern exactly.
+  const helper = [
+    "const fs = require('fs');",
+    "const { cleanupSnapshot } = require('./src/snapshot');",
+    `fs.writeFileSync(${JSON.stringify(snap)}, 'x');`,
+    'let snapshotCleaned = false;',
+    `const cleanupOnExit = () => { if (snapshotCleaned) return; snapshotCleaned = true; cleanupSnapshot(${JSON.stringify(snap)}); };`,
+    "process.once('exit', cleanupOnExit);",
+    'process.exit(4);  // simulate postToWebhook failure — finally is bypassed',
+  ].join('\n')
+
+  await new Promise(resolve => execFile('node', ['-e', helper], { cwd: path.join(__dirname, '..') }, resolve))
+  assert.ok(!fs.existsSync(snap), 'snapshot must be removed by once-exit handler before the process terminates')
 })
 
 // ── parseNewDraftsCount ───────────────────────────────────────────────────────
