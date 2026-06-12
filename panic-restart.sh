@@ -42,10 +42,10 @@ fi
 
 echo
 echo "━━ 3. Reinstalling deps ━━"
-if npm install --silent --no-audit --no-fund 2>&1; then
+if npm install --loglevel error --no-audit --no-fund 2>&1; then
   echo "   ✓ deps installed"
 else
-  echo "   ⚠ npm install warnings (continuing)"
+  echo "   ⚠ npm install encountered errors (continuing)"
 fi
 
 echo
