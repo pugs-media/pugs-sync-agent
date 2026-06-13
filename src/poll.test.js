@@ -791,6 +791,42 @@ test('flushJournal: does NOT clear entry when reportOutcome returns false (cloud
   assert.deepEqual(cleared, [], 'journal must not be cleared when outcome is unconfirmed')
 })
 
+test('flushJournal: partial flush — first item fails, subsequent items are still confirmed and cleared', async () => {
+  // A transient cloud error on item-1 must NOT halt processing of item-2 and item-3.
+  // If the loop broke on first failure, those entries would stay in the journal,
+  // seenIds would pre-seed with them, and the cloud's re-delivery of those items
+  // would be silently skipped every poll cycle — a permanent outbound dispatch stall.
+  const cleared = []
+  let call = 0
+  await flushJournal({
+    reportOutcome: async (id) => {
+      call++
+      // item-1 fails; item-2 and item-3 succeed
+      return call > 1
+    },
+    journalList:  () => ['item-1', 'item-2', 'item-3'],
+    journalClear: (id) => { cleared.push(id) },
+    log: noop,
+  })
+  assert.deepEqual(cleared, ['item-2', 'item-3'], 'only confirmed items cleared; failed item stays in journal')
+})
+
+test('flushJournal: partial flush — confirmed items cleared, unconfirmed items kept (mixed journal)', async () => {
+  // Verifies the exact split: only items where reportOutcome returned true are
+  // removed from the journal. A regression that clears ALL entries (regardless of
+  // confirmation) would remove the double-send guard for unconfirmed dispatches.
+  const cleared = []
+  // item-A and item-C confirm; item-B does not
+  const outcomes = { 'item-A': true, 'item-B': false, 'item-C': true }
+  await flushJournal({
+    reportOutcome: async (id) => outcomes[id] ?? false,
+    journalList:   () => ['item-A', 'item-B', 'item-C'],
+    journalClear:  (id) => { cleared.push(id) },
+    log: noop,
+  })
+  assert.deepEqual(cleared, ['item-A', 'item-C'], 'exactly the confirmed items are cleared — unconfirmed item-B must stay')
+})
+
 // ---------------------------------------------------------------------------
 // processBatch: dedup guard — duplicate item IDs within a single batch
 //
