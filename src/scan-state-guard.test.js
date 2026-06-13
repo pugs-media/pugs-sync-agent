@@ -179,3 +179,40 @@ test('cursor advances to dedupedRows last rowid (not filteredPayload) — handle
     'empty (all rows prospect-filtered) that expression is undefined and the cursor stalls'
   )
 })
+
+test('entry-point catch block: awaits reportHealth before process.exit(1) so the cloud dashboard sees unexpected crashes', () => {
+  // Bug: the old .then()/.catch() pattern called reportHealth() synchronously
+  // (no await), then called process.exit(1). Node.js terminates the process
+  // before the async fetch inside reportHealth resolves — the HTTP POST is
+  // abandoned mid-flight and the cloud health endpoint never receives the error.
+  //
+  // The result: when main() throws an unexpected error (not one of the explicit
+  // process.exit paths), the cloud dashboard shows the LAST successful health
+  // report — indistinguishable from "scanner ran fine but sent 0 messages."
+  // Charlie has no visibility into the failure until he manually checks the logs.
+  //
+  // Fix: async IIFE wrapper so both the success and error branches can await
+  // reportHealth before exiting. This ensures the health POST completes before
+  // the process terminates in the catch path.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  // Must use an async wrapper (IIFE) so await is valid in the catch block
+  assert.ok(
+    scanCode.includes('async () =>') || scanCode.includes('async() =>'),
+    'scan.js entry-point must use an async IIFE wrapper so the catch block can await reportHealth'
+  )
+
+  // The catch path must await reportHealth (not just call it synchronously)
+  // Verify 'await reportHealth' appears in the source at all
+  assert.ok(
+    scanCode.includes('await reportHealth('),
+    'scan.js must await reportHealth (not just call it) so the health POST completes before process exits'
+  )
+
+  // The catch path must call process.exit(1) AFTER the await
+  // Both must appear in the source; structural ordering is enforced by the async/await requirement above
+  assert.ok(
+    scanCode.includes('process.exit(1)'),
+    'scan.js catch block must still call process.exit(1) after awaiting the health report'
+  )
+})

@@ -795,19 +795,24 @@ if (require.main === module) {
   })
 
   const startMs = Date.now()
-  main()
-    .then(result => {
+  // Async IIFE so both branches can await reportHealth before exiting.
+  // Without this, the .catch() callback is sync and process.exit(1) kills
+  // the process before the health POST completes — the cloud dashboard
+  // never sees the failure.
+  ;(async () => {
+    try {
+      const result = await main()
       const durationMs = Date.now() - startMs
       // result may be undefined or { messageCount } depending on the main() flow
       const messageCount = result?.messageCount || 0
-      reportHealth('scanner', 'ok', { itemCount: messageCount, durationMs })
-    })
-    .catch(e => {
+      await reportHealth('scanner', 'ok', { itemCount: messageCount, durationMs })
+    } catch (e) {
       const durationMs = Date.now() - startMs
       console.error('Scan failed:', e)
-      reportHealth('scanner', 'error', { errorMessage: e.message, durationMs })
+      await reportHealth('scanner', 'error', { errorMessage: e.message, durationMs })
       process.exit(1)
-    })
+    }
+  })()
 }
 
 module.exports = { fetchProspectHandles, parseProspectHandles, fetchOrCachedProspects, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts, computeAllDedupCursorRowid }
