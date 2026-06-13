@@ -1232,6 +1232,29 @@ test('shouldSyncContacts: new-drafts trigger reports correct count in trigger st
   assert.equal(trigger, '7 new draft(s)')
 })
 
+test('shouldSyncContacts: corrupt/non-parseable lastContactsAt is treated as never-synced (hourly fallback fires)', () => {
+  // new Date('garbage').getTime() returns NaN. NaN > CONTACTS_SYNC_INTERVAL_MS
+  // is always false — so any corrupt value would silently prevent the hourly
+  // fallback from ever firing, stopping name enrichment indefinitely.
+  // The fix treats any non-finite result as 0 (never synced).
+  const now = 1_700_000_000_000
+  for (const bad of ['not-a-date', '', 'null', '0000-99-99', 'undefined']) {
+    const result = shouldSyncContacts(bad, 0, { now })
+    assert.equal(result.should, true,
+      `corrupt lastContactsAt "${bad}" must treat as never-synced and trigger hourly fallback`)
+    assert.equal(result.trigger, 'hourly fallback')
+  }
+})
+
+test('shouldSyncContacts: valid ISO date is still parsed and respected (regression guard)', () => {
+  // Confirm the NaN-safe path does NOT break normal operation: a recently-set
+  // valid ISO string must prevent an unnecessary re-sync.
+  const now = 1_700_000_000_000
+  const recentSync = new Date(now - 10_000).toISOString()  // 10s ago
+  const result = shouldSyncContacts(recentSync, 0, { now })
+  assert.equal(result.should, false, 'valid recent sync timestamp must suppress the hourly fallback')
+})
+
 // ── assertChatDbSchema ────────────────────────────────────────────────────────
 // These tests guard the macOS-upgrade schema risk: if Apple renames or removes
 // a column we query, assertChatDbSchema must throw a clear, diagnosable error

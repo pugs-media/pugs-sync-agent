@@ -125,7 +125,13 @@ function contactsBase(webhookUrl) {
  * this check break that invariant.
  */
 function shouldSyncContacts(lastContactsAt, newDraftsThisRun, { now = Date.now() } = {}) {
-  const lastSync = lastContactsAt ? new Date(lastContactsAt).getTime() : 0
+  // Parse the stored timestamp. new Date('garbage').getTime() returns NaN, and
+  // NaN comparisons always return false — so a corrupt value would silently
+  // prevent the hourly fallback from ever firing, stopping all name enrichment.
+  // Fall back to 0 (treat as "never synced") so the hourly fallback triggers
+  // on the very next run, the same as when the field is absent entirely.
+  const parsedMs = lastContactsAt ? new Date(lastContactsAt).getTime() : NaN
+  const lastSync = Number.isFinite(parsedMs) ? parsedMs : 0
   const sinceLastSync = now - lastSync
   if (newDraftsThisRun > 0 && sinceLastSync > NEW_DRAFT_MIN_THROTTLE_MS) {
     return { should: true, trigger: `${newDraftsThisRun} new draft(s)` }
