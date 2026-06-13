@@ -214,3 +214,87 @@ test('update.sh: watchdog beacon body uses $watchdog_reason (not hardcoded "scan
     'beacon body must use $watchdog_reason so the actual trigger is sent to pugs-sales'
   )
 })
+
+// ── watchdog grep ↔ scan.js log-string alignment ─────────────────────────────
+// The watchdog in update.sh greps scanner.log for success indicators. If scan.js
+// renames a log string without updating the grep, the watchdog silently misfires —
+// it treats every healthy run as a crash-loop and triggers panic-restart every 10
+// minutes, restarting all services and sending false alerts to Charlie. These tests
+// lock the alignment so a log-string rename is caught before it ships.
+//
+// Each test: (a) confirms the pattern appears in the watchdog grep, (b) confirms the
+// matching log string still exists in scan.js. Both checks must pass together —
+// having the pattern without the log line is dead pattern; having the log line
+// without the pattern is a watchdog blind spot.
+
+const SCAN_JS = path.join(__dirname, 'scan.js')
+
+// Helper: extract the watchdog grep -qE pattern from update.sh.
+// Returns the alternation string, e.g. "Webhook OK|sending heartbeat|..."
+function extractWatchdogGrepPattern(updateShSrc) {
+  const m = updateShSrc.match(/grep -qE "([^"]+)"/)
+  assert.ok(m, 'watchdog grep -qE pattern must be present in update.sh')
+  return m[1]
+}
+
+test('update.sh watchdog grep: "Webhook OK" matches what scan.js actually logs on successful POST', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const scanSrc = fs.readFileSync(SCAN_JS, 'utf8')
+  const pattern = extractWatchdogGrepPattern(src)
+
+  assert.ok(
+    pattern.includes('Webhook OK'),
+    '"Webhook OK" must be in the watchdog grep pattern — removing it means successful scans are invisible to the watchdog'
+  )
+  assert.ok(
+    scanSrc.includes('Webhook OK'),
+    'scan.js must log a line containing "Webhook OK" — if this string is renamed without updating the grep pattern the watchdog panic-restarts healthy scanners'
+  )
+})
+
+test('update.sh watchdog grep: "sending heartbeat" matches what scan.js actually logs on empty-queue run', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const scanSrc = fs.readFileSync(SCAN_JS, 'utf8')
+  const pattern = extractWatchdogGrepPattern(src)
+
+  assert.ok(
+    pattern.includes('sending heartbeat'),
+    '"sending heartbeat" must be in the watchdog grep pattern — quiet runs with no messages must still count as healthy'
+  )
+  assert.ok(
+    scanSrc.includes('sending heartbeat'),
+    'scan.js must log a line containing "sending heartbeat" on empty-queue runs — rename without grep update causes watchdog to panic-restart on every quiet scan'
+  )
+})
+
+test('update.sh watchdog grep: "Posting [0-9]+ messages" pattern matches what scan.js actually logs', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const scanSrc = fs.readFileSync(SCAN_JS, 'utf8')
+  const pattern = extractWatchdogGrepPattern(src)
+
+  assert.ok(
+    pattern.includes('Posting [0-9]+ messages'),
+    '"Posting [0-9]+ messages" must be in the watchdog grep pattern'
+  )
+  // scan.js logs: `Posting ${filteredPayload.length} messages (ROWIDs ...)`
+  // Verify the template literal prefix still exists so the pattern can match.
+  assert.ok(
+    scanSrc.includes('} messages (ROWIDs'),
+    'scan.js must log "Posting N messages (ROWIDs..." — if this prefix is renamed the "Posting [0-9]+ messages" pattern stops matching and the watchdog misfires'
+  )
+})
+
+test('update.sh watchdog grep: "GUID-deduped" matches what scan.js actually logs in cursor-advance path', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const scanSrc = fs.readFileSync(SCAN_JS, 'utf8')
+  const pattern = extractWatchdogGrepPattern(src)
+
+  assert.ok(
+    pattern.includes('GUID-deduped'),
+    '"GUID-deduped" must be in the watchdog grep pattern — post-ROWID-reset cursor-advance runs must be recognised as healthy'
+  )
+  assert.ok(
+    scanSrc.includes('GUID-deduped'),
+    'scan.js must log a line containing "GUID-deduped" in the all-dedup cursor-advance branch — rename without grep update causes watchdog to fire during normal post-ROWID-reset recovery'
+  )
+})
