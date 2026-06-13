@@ -245,17 +245,24 @@ test('reportOutcome: succeeds on 2nd attempt after a 408 timeout', async () => {
   assert.equal(calls, 2, 'should succeed after retrying 408')
 })
 
-test('reportOutcome: throws after all 3 retries exhausted on repeated 429', async () => {
+test('reportOutcome: returns false after exhausted 429 retries — cloud unconfirmed', async () => {
   let calls = 0
-  try {
-    await reportOutcome('id-12', { status: 'sent' }, {
-      _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'rate limit' } },
-      _delay: noDelay,
-    })
-  } catch {
-    // expected: no throw on exhausted retries (log-and-swallow), but we call it anyway
-  }
+  const result = await reportOutcome('id-12', { status: 'sent' }, {
+    _fetch: async () => { calls++; return { ok: false, status: 429, text: async () => 'rate limit' } },
+    _delay: noDelay,
+  })
   assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times on repeated 429')
+  assert.equal(result, false, 'unconfirmed: caller must not clear the journal entry')
+})
+
+test('reportOutcome: returns false after exhausted 408 retries — cloud unconfirmed', async () => {
+  let calls = 0
+  const result = await reportOutcome('id-408ex', { status: 'sent' }, {
+    _fetch: async () => { calls++; return { ok: false, status: 408, text: async () => 'Request Timeout' } },
+    _delay: noDelay,
+  })
+  assert.equal(calls, 3, 'should try exactly MAX_REPORT_TRIES times on repeated 408')
+  assert.equal(result, false, 'unconfirmed: caller must not clear the journal entry')
 })
 
 // ---------------------------------------------------------------------------
