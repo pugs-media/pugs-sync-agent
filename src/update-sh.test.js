@@ -298,3 +298,29 @@ test('update.sh watchdog grep: "GUID-deduped" matches what scan.js actually logs
     'scan.js must log a line containing "GUID-deduped" in the all-dedup cursor-advance branch — rename without grep update causes watchdog to fire during normal post-ROWID-reset recovery'
   )
 })
+
+test('update.sh watchdog grep: "no webhook POST" matches what scan.js logs in all-prospect-filtered path (prevents false panic-restart)', () => {
+  // Bug: when every new iMessage is from a non-prospect (family/friends/spam),
+  // scan.js advances the cursor without POSTing to the webhook. This is a healthy
+  // run, but the old watchdog grep had no pattern matching the log output of this
+  // path — so after 30min of personal-message bursts (6 scan cycles), the watchdog
+  // would fire a false panic-restart even though the scanner was working correctly.
+  //
+  // The all-filtered path logs:
+  //   "All N rows filtered (...) — advancing cursor to ROWID M, no webhook POST"
+  // Adding "no webhook POST" to the grep covers this case.
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const scanSrc = fs.readFileSync(SCAN_JS, 'utf8')
+  const pattern = extractWatchdogGrepPattern(src)
+
+  assert.ok(
+    pattern.includes('no webhook POST'),
+    '"no webhook POST" must be in the watchdog grep pattern so all-prospect-filtered runs are recognised as healthy — ' +
+    'without this, 30min of personal-message scans (6 cycles) triggers a false panic-restart'
+  )
+  assert.ok(
+    scanSrc.includes('no webhook POST'),
+    'scan.js must log a line containing "no webhook POST" in the all-prospect-filtered cursor-advance branch — ' +
+    'rename without updating the watchdog grep causes false panic-restarts on personal-message bursts'
+  )
+})
