@@ -1036,7 +1036,11 @@ test('processBatch: journal-seed is empty when journal is empty — no effect on
 // journal mark failure safety
 // ---------------------------------------------------------------------------
 
-test('processBatch: journal mark failure is caught and reported as failed (prevents double-send)', async () => {
+test('processBatch: journal mark failure after successful send reports "sent" (not "failed") to prevent double-send', async () => {
+  // When the iMessage was already sent but journalMark fails (disk full, permissions),
+  // reporting 'failed' to the cloud would cause it to re-queue and double-send the message.
+  // The correct outcome is 'sent' — crash recovery is unavailable (no journal entry), but
+  // that risk is inherent to disk failure; it is strictly less bad than a guaranteed double-send.
   const reported = []
   const dispatched = []
   const item = { id: 'journal-fail', to_handle: '+14155550100', body: 'hello', attempts: 0 }
@@ -1044,15 +1048,12 @@ test('processBatch: journal mark failure is caught and reported as failed (preve
   await processBatch([item], deps({
     dispatchToLocalSender: async (i) => { dispatched.push(i.id) },
     journalMark: () => false, // Simulate mark failure (disk full, permissions, etc.)
-    reportOutcome: async (id, payload) => { reported.push({ id, payload }) },
+    reportOutcome: async (id, payload) => { reported.push({ id, payload }); return true },
   }))
 
-  // Item was dispatched (we can't prevent that after sender returns)
-  assert.equal(dispatched.length, 1, 'sender was called')
-  // But mark failure was caught and reported as failed
-  assert.equal(reported.length, 1, 'failure must be reported to cloud')
-  assert.equal(reported[0].payload.status, 'failed', 'must report as failed')
-  assert.ok(reported[0].payload.error.includes('journal mark failed'), 'error must mention journal failure')
+  assert.equal(dispatched.length, 1, 'sender must be called')
+  assert.equal(reported.length, 1, 'outcome must be reported to cloud')
+  assert.equal(reported[0].payload.status, 'sent', 'must report "sent" — the message was sent; "failed" would trigger a double-send')
 })
 
 // ── loop health reporting ──────────────────────────────────────────────────────
