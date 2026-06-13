@@ -1771,3 +1771,80 @@ test('fetchOrCachedProspects: throws when cloud fails and cached_prospects is co
 
   fs.unlinkSync(statePath)
 })
+
+test('fetchOrCachedProspects: returns FRESH prospects when state save fails (not stale cache)', async () => {
+  // If saveState throws (disk full, permissions), the fresh fetch result must
+  // still be returned for this run. Before the fix, the save error was caught
+  // by the outer catch block and treated as a fetch failure — the function
+  // fell back to stale cached data, silently filtering a newly-added prospect.
+  const statePath = tmpStatePath()
+  const { saveState: realSave } = require('./state')
+
+  // Seed state with a STALE cached allowlist (missing the new prospect's phone)
+  realSave(statePath, {
+    last_rowid: 10,
+    cached_prospects: { phones: ['8005550100'], emails: [] },
+  })
+
+  // Fresh fetch returns an UPDATED allowlist with the new prospect
+  const _fetch = async () => ({
+    ok: true,
+    json: async () => ({ phones: ['+18005550100', '+14155559999'], emails: [], count_phones: 2, count_emails: 0 }),
+  })
+
+  const result = await fetchOrCachedProspects({
+    _fetch,
+    _delay:      NOOP_DELAY,
+    _saveState:  () => { throw new Error('ENOSPC: no space left on device') },
+    webhookUrl:  'https://example.pugs.media/api/import/imessage',
+    secret:      'test-secret',
+    scannerId:   '',
+    statePath,
+  })
+
+  // Must return the FRESH prospects (both phones), not the stale cached one
+  assert.ok(result.phones instanceof Set, 'result must be a live prospects Set')
+  assert.ok(result.phones.has('8005550100'), 'existing phone must be present')
+  assert.ok(result.phones.has('4155559999'), 'NEW prospect phone must be present — fresh data, not stale cache')
+  assert.equal(result.phones.size, 2, 'both phones from the fresh fetch must be present')
+
+  fs.unlinkSync(statePath)
+})
+
+test('fetchOrCachedProspects: logs a warning (not a crash) when state save fails', async () => {
+  const statePath = tmpStatePath()
+  const { saveState: realSave } = require('./state')
+  realSave(statePath, { last_rowid: 0 })
+
+  const _fetch = async () => ({
+    ok: true,
+    json: async () => ({ phones: ['4155550100'], emails: [], count_phones: 1, count_emails: 0 }),
+  })
+
+  const warnings = []
+  const origWarn = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+
+  let result
+  try {
+    result = await fetchOrCachedProspects({
+      _fetch,
+      _delay:      NOOP_DELAY,
+      _saveState:  () => { throw new Error('ENOSPC: no space left on device') },
+      webhookUrl:  'https://example.pugs.media/api/import/imessage',
+      secret:      'test-secret',
+      scannerId:   '',
+      statePath,
+    })
+  } finally {
+    console.warn = origWarn
+  }
+
+  assert.ok(result.phones instanceof Set, 'must return a valid prospects object despite the save failure')
+  assert.ok(
+    warnings.some(w => w.includes('could not cache fresh allowlist') && w.includes('ENOSPC')),
+    `must log a warning mentioning the save failure; got: ${JSON.stringify(warnings)}`,
+  )
+
+  fs.unlinkSync(statePath)
+})
