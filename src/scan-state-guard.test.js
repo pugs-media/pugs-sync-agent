@@ -66,3 +66,25 @@ test('health-before-exit(4): webhook failure reports health=error before exiting
     'scan.js must call reportHealth(error) before process.exit(4) on webhook failure'
   )
 })
+
+test('sent_guids tracks filteredPayload GUIDs (actually sent), not dedupedRows (all scanned)', () => {
+  // Bug: using dedupedRows.map(r => r.guid) adds GUIDs of non-prospect / normalization-dropped
+  // messages to sent_guids even though those messages were NEVER shipped to pugs-sales.
+  // After a ROWID reset recovery (7-day fallback), those messages reappear in the window.
+  // If the person became a prospect in the meantime, their messages would be incorrectly
+  // GUID-deduped out — a silent lead loss.
+  //
+  // Fix: use filteredPayload.map(r => r.guid) so only confirmed-sent GUIDs are tracked.
+  // The cursor still advances to dedupedRows.last.rowid (unchanged), so non-prospect
+  // messages are not re-processed in normal operation.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('filteredPayload.map(r => r.guid)'),
+    'scan.js must track filteredPayload GUIDs (actually sent), not dedupedRows (all scanned)'
+  )
+  assert.ok(
+    !scanCode.includes('dedupedRows.map(r => r.guid)'),
+    'scan.js must NOT use dedupedRows.map(r => r.guid) — that incorrectly marks un-sent messages as sent'
+  )
+})
