@@ -92,6 +92,36 @@ test('all-GUID-dedup cursor-advance state-save guard: catches saveState errors a
   )
 })
 
+test('all-filtered cursor-advance state-save guard: catches saveState errors and reports health (prevents silent cursor stall)', () => {
+  // If saveState fails (disk full, permissions) in the all-prospect-filtered cursor-advance
+  // path of main(), the scanner must log it, report health=error, and exit — NOT silently
+  // continue with the cursor un-advanced.
+  //
+  // Why this stalls leads: this path fires whenever dedupedRows has content but every row
+  // was dropped by the prospect/account filter (personal conversations with friends, family,
+  // spam). Without the try/catch, a disk-full error leaves the cursor stuck: every subsequent
+  // 5-min scan re-reads the same personal-message batch, never advancing to higher ROWIDs
+  // where genuine prospect leads sit — a silent lead-loss stall identical to normal idle
+  // behaviour on the dashboard.
+  //
+  // Mirrors the parallel guard for the all-GUID-dedup cursor-advance path (above).
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('State save failed after all-filtered cursor advance'),
+    'scan.js must have a specific error message for the all-filtered cursor advance saveState failure — ' +
+    'removing this guard leaves the cursor stuck at the old position, blocking all subsequent leads'
+  )
+  assert.ok(
+    scanCode.includes("reportHealth('scanner', 'error'"),
+    'scan.js must call reportHealth(scanner, error) so a disk-full cursor stall is visible on the dashboard'
+  )
+  assert.ok(
+    scanCode.includes('process.exit(3)'),
+    'scan.js must exit(3) on saveState failure to trigger a launchd restart — a clean slate clears transient disk issues'
+  )
+})
+
 test('sent_guids tracks filteredPayload GUIDs (actually sent), not dedupedRows (all scanned)', () => {
   // Bug: using dedupedRows.map(r => r.guid) adds GUIDs of non-prospect / normalization-dropped
   // messages to sent_guids even though those messages were NEVER shipped to pugs-sales.
