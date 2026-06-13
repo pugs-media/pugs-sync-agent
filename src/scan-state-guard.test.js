@@ -216,3 +216,48 @@ test('entry-point catch block: awaits reportHealth before process.exit(1) so the
     'scan.js catch block must still call process.exit(1) after awaiting the health report'
   )
 })
+
+test('health-before-exit(3): chat.db missing reports health=error before exiting (FDA-revoked is immediately visible)', () => {
+  // Without a health report before process.exit(3), a Full Disk Access revocation
+  // (the most common silent failure mode — macOS revokes FDA after system updates)
+  // is invisible to the cloud dashboard for up to 30 minutes until the watchdog fires.
+  // With reportHealth here, the dashboard shows error immediately on the next expected
+  // heartbeat miss — same pattern already used for heartbeat and webhook failures.
+  //
+  // reportHealth is best-effort (swallows network errors), so this costs nothing when
+  // the cloud is also down, and adds visibility when only the scanner-side path is broken.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('Full Disk Access may be revoked'),
+    'scan.js must include the FDA-revoked message so the cloud dashboard shows a diagnosable error'
+  )
+  assert.ok(
+    scanCode.includes("await reportHealth('scanner', 'error'"),
+    'scan.js must await reportHealth(error) before process.exit(3) on chat.db missing'
+  )
+})
+
+test('health-before-exit(5): prospect allowlist failure reports health=error before exiting', () => {
+  // Without a health report before process.exit(5), a broken or unreachable prospect-handles
+  // endpoint (with no cache) exits silently — the cloud dashboard shows the last ok heartbeat
+  // rather than an error. Charlie can't distinguish "scanner is idle" from "scanner can't reach
+  // the allowlist endpoint". When the health endpoint is still reachable (e.g. only one Vercel
+  // route is broken), the report succeeds and the error is immediately visible.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  // Verify: the prospects catch block now calls reportHealth before exit(5)
+  // The message is the raw e.message from fetchOrCachedProspects, which includes the
+  // fetch error and context about whether a cache was available.
+  const prospectsCatchIdx = scanCode.indexOf('process.exit(5)')
+  assert.ok(
+    prospectsCatchIdx !== -1,
+    'scan.js must call process.exit(5) on prospect allowlist failure'
+  )
+  // reportHealth must appear before exit(5) — check its index < exit(5) index
+  const reportHealthIdx = scanCode.lastIndexOf("await reportHealth('scanner', 'error'", prospectsCatchIdx)
+  assert.ok(
+    reportHealthIdx !== -1 && reportHealthIdx < prospectsCatchIdx,
+    'scan.js must call reportHealth(error) before process.exit(5) on prospect allowlist failure'
+  )
+})

@@ -521,8 +521,10 @@ function computeAllDedupCursorRowid(rows, dedupedRows) {
 
 async function main() {
   if (!fs.existsSync(CHAT_DB)) {
-    console.error(`chat.db not found at ${CHAT_DB}`)
+    const msg = `chat.db not found at ${CHAT_DB} — Full Disk Access may be revoked`
+    console.error(msg)
     console.error('Have you granted Full Disk Access to the Node binary?')
+    await reportHealth('scanner', 'error', { errorMessage: msg })
     process.exit(3)
   }
 
@@ -537,6 +539,7 @@ async function main() {
     console.log(`Prospect allowlist: ${prospects.phones.size} phones + ${prospects.emails.size} emails (${prospects.total} total)`)
   } catch (e) {
     console.error(e.message)
+    await reportHealth('scanner', 'error', { errorMessage: e.message })
     process.exit(5)
   }
 
