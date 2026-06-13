@@ -172,7 +172,73 @@ test('update.sh: watchdog skips entirely when scanner.log does not exist (preven
   )
 })
 
-// ── watchdog beacon ──────────────────────────────────────────────────────────
+// ── watchdog panic-restart exit-code capture ──────────────────────────────────
+
+test('update.sh: watchdog captures panic-restart.sh exit code — does not pipe directly into sed', () => {
+  // Bug: `bash panic-restart.sh 2>&1 | sed ...` checks sed's exit code (always 0),
+  // not panic-restart.sh's. If the self-heal fails (npm install, launchctl), the
+  // pipe form silently exits 0 and update.sh declares "WATCHDOG done" while the
+  // scanner is still stalled. Mirrors the same fix applied in panic-restart.sh step 5.
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+
+  // Must NOT use the pipe form that swallows the exit code.
+  assert.ok(
+    !src.match(/bash\s+"\$AGENT_ROOT\/panic-restart\.sh"\s+2>&1\s*\|\s*sed/),
+    'watchdog must not pipe panic-restart.sh directly into sed — that swallows the exit code; capture output to a variable first'
+  )
+
+  // Must capture output to a variable so $? reflects panic-restart.sh, not sed.
+  assert.ok(
+    src.includes('panic_out=$(bash "$AGENT_ROOT/panic-restart.sh" 2>&1)'),
+    'watchdog must capture panic-restart.sh output into panic_out before piping — preserves exit code in $?'
+  )
+
+  // Must read the exit code immediately after the capture.
+  assert.ok(
+    src.includes('panic_rc=$?'),
+    'watchdog must save panic-restart.sh exit code as panic_rc=$? so the failure branch can act on it'
+  )
+})
+
+test('update.sh: watchdog logs a clear failure message when panic-restart.sh exits non-zero', () => {
+  // Without this, a failed self-heal is invisible: update.sh exits 0 and the health
+  // dashboard shows "WATCHDOG fired" (assumed OK), while the scanner is still stalled
+  // and dropping leads. The log must say the recovery failed so Charlie can triage.
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+
+  assert.ok(
+    src.includes('panic_rc') && src.includes('self-heal FAILED'),
+    'watchdog must log a "self-heal FAILED" message when panic-restart.sh exits non-zero'
+  )
+
+  // Verify the failure log comes after the exit-code check (not before).
+  const exitCodeIdx = src.indexOf('panic_rc=$?')
+  const failLogIdx  = src.indexOf('self-heal FAILED')
+  assert.ok(
+    exitCodeIdx < failLogIdx,
+    '"self-heal FAILED" log must come after panic_rc=$? so it only fires on non-zero exit'
+  )
+})
+
+test('update.sh: watchdog beacon includes self_heal_ok field so pugs-sales can distinguish recovery success from failure', () => {
+  // The health dashboard receives "watchdog-fired" beacons. Without self_heal_ok,
+  // Charlie cannot tell from the dashboard alone whether the self-heal succeeded or
+  // left the scanner in a broken state — he has to read the updater.log manually.
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+
+  assert.ok(
+    src.includes('self_heal_ok'),
+    'watchdog beacon body must include self_heal_ok so pugs-sales can surface failed self-heals as a separate alert'
+  )
+
+  // Verify the field uses the captured exit code variable, not a hardcoded value.
+  // The shell script uses escaped quotes inside the -d "..." argument, so the
+  // literal source text is \"self_heal_ok\":$self_heal_ok.
+  assert.ok(
+    src.includes('\\"self_heal_ok\\":$self_heal_ok'),
+    'beacon self_heal_ok must be set from $self_heal_ok (derived from panic_rc), not hardcoded'
+  )
+})
 
 // ── BASE_URL origin derivation ────────────────────────────────────────────────
 
