@@ -679,10 +679,13 @@ async function main() {
     messageCount = filteredPayload.length
 
     // Only advance state if the POST succeeded.
-    // Track GUIDs of sent messages so we can dedup on ROWID reset.
-    // Keep the sent_guids set bounded to avoid unbounded growth.
+    // Track GUIDs of ACTUALLY SENT messages (filteredPayload, not dedupedRows) so
+    // that a non-prospect scanned today who becomes a prospect later can still have
+    // their messages delivered after a ROWID reset recovery. Using dedupedRows would
+    // permanently block those messages in sent_guids even though they were never
+    // shipped to pugs-sales — a lead-loss risk after a VACUUM or macOS upgrade.
     const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
-    const guidsToAdd = dedupedRows.map(r => r.guid)
+    const guidsToAdd = filteredPayload.map(r => r.guid)
     const newSentGuids = [...sentGuids, ...guidsToAdd]
     const MAX_SENT_GUIDS = 10000
     const boundedSentGuids = newSentGuids.slice(-MAX_SENT_GUIDS)
