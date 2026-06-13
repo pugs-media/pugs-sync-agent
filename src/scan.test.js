@@ -1130,6 +1130,51 @@ test('scan: prospect-filtered row GUIDs are NOT added to sent_guids — preserve
   assert.ok(!guidsToAdd.includes('np-guid-2'), 'np-guid-2 must not enter sent_guids')
 })
 
+test('scan: when all rows pass GUID dedup but are all prospect-filtered, cursor lastRowid must use dedupedRows — not filteredPayload', () => {
+  // Production formula: lastRowid = dedupedRows[dedupedRows.length - 1].rowid
+  // NOT: lastRowid = filteredPayload[filteredPayload.length - 1].rowid
+  //
+  // When inbound messages survive GUID dedup but fail the prospect filter
+  // (common case — non-prospect personal texts), filteredPayload is empty.
+  // The cursor MUST still advance to the last dedupedRow ROWID so the next
+  // scan doesn't re-read the same non-prospect batch forever. Using
+  // filteredPayload as the cursor source would produce TypeError: Cannot
+  // read properties of undefined (reading 'rowid') — crashing main() and
+  // halting the scanner every tick that contains only non-prospect messages.
+  // New leads at higher ROWIDs are silently blocked until state.json is
+  // manually reset.
+  const { normalizeRows } = require('./payload')
+  const { filterMessages } = require('./filter')
+
+  const VALID_DATE = 1609459200000000000  // well-formed Apple timestamp
+
+  const dedupedRows = [
+    { rowid: 10, guid: 'np-guid-1', text: 'hey', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550100',
+      chat_guid: 'iMessage;-;+15555550100', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550100' },
+    { rowid: 11, guid: 'np-guid-2', text: 'ping', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550100',
+      chat_guid: 'iMessage;-;+15555550100', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550100' },
+  ]
+
+  const payload = normalizeRows(dedupedRows)
+  assert.equal(payload.length, 2, 'both rows must survive normalizeRows')
+
+  const prospects = { phones: new Set(), emails: new Set() }
+  const { kept: filteredPayload } = filterMessages(payload, { prospects })
+  assert.equal(filteredPayload.length, 0, 'both rows filtered by empty prospect allowlist')
+
+  // Production cursor formula — must use dedupedRows, not filteredPayload
+  const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
+  assert.equal(lastRowid, 11, 'cursor must advance to ROWID 11 (last dedupedRow) so the scanner is not stuck re-reading non-prospect noise')
+
+  // Show what using filteredPayload would produce — undefined, causing TypeError
+  const wrongSource = filteredPayload[filteredPayload.length - 1]
+  assert.equal(wrongSource, undefined, 'filteredPayload[-1] is undefined when all filtered — using it as cursor source crashes main()')
+})
+
 // ── GUID dedup cursor-stall regression ────────────────────────────────────────
 // After a ROWID reset, the scanner falls back to a 7-day window. If ALL the
 // messages in that window were already sent (their GUIDs are in sent_guids),
