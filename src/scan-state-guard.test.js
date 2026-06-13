@@ -67,6 +67,31 @@ test('health-before-exit(4): webhook failure reports health=error before exiting
   )
 })
 
+test('all-GUID-dedup cursor-advance state-save guard: catches saveState errors and reports health (prevents silent cursor stall)', () => {
+  // If saveState fails (disk full, permissions) after the all-GUID-dedup cursor advance,
+  // the scanner must log it, report health=error, and exit — NOT silently continue.
+  //
+  // Without this guard, a disk-full failure would leave the cursor stuck at the old
+  // position: every subsequent 5-min scan re-queries the same GUID-deduped batch,
+  // keeps hitting "no new messages", and never advances to real new leads —
+  // a silent lead-loss stall that looks identical to normal idle behaviour on the
+  // dashboard. The exit triggers a launchd restart so a transient disk-full clears.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('State save failed after all-GUID-dedup cursor advance'),
+    'scan.js must have a specific error message for the all-GUID-dedup cursor advance saveState failure path'
+  )
+  assert.ok(
+    scanCode.includes("reportHealth('scanner', 'error'"),
+    'scan.js must call reportHealth(scanner, error) on all-GUID-dedup cursor advance saveState failure'
+  )
+  assert.ok(
+    scanCode.includes('process.exit(3)'),
+    'scan.js must exit(3) on all-GUID-dedup cursor advance saveState failure to trigger launchd restart'
+  )
+})
+
 test('sent_guids tracks filteredPayload GUIDs (actually sent), not dedupedRows (all scanned)', () => {
   // Bug: using dedupedRows.map(r => r.guid) adds GUIDs of non-prospect / normalization-dropped
   // messages to sent_guids even though those messages were NEVER shipped to pugs-sales.
