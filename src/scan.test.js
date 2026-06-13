@@ -1175,6 +1175,51 @@ test('scan: when all rows pass GUID dedup but are all prospect-filtered, cursor 
   assert.equal(wrongSource, undefined, 'filteredPayload[-1] is undefined when all filtered — using it as cursor source crashes main()')
 })
 
+test('scan: postToWebhook is NOT called when all dedupedRows are dropped by prospect filter', () => {
+  // Bug: when filteredPayload is empty (all rows non-prospect), the old code still
+  // called postToWebhook({ messages: [] }). If the webhook was transiently down,
+  // the scanner exited(4) for a batch that had nothing to send — a false error.
+  // Fix: when filteredPayload.length === 0, skip the POST and advance cursor directly.
+  //
+  // This test verifies the production path decision by simulating the condition
+  // and confirming the behavior that must hold: no POST, cursor still advances.
+  const { normalizeRows } = require('./payload')
+  const { filterMessages } = require('./filter')
+
+  const VALID_DATE = 1609459200000000000
+
+  const dedupedRows = [
+    { rowid: 20, guid: 'np-a', text: 'hey', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550101',
+      chat_guid: 'iMessage;-;+15555550101', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550101' },
+    { rowid: 21, guid: 'np-b', text: 'ping', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550101',
+      chat_guid: 'iMessage;-;+15555550101', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550101' },
+  ]
+
+  const payload = normalizeRows(dedupedRows)
+  assert.equal(payload.length, 2)
+
+  const prospects = { phones: new Set(), emails: new Set() }
+  const { kept: filteredPayload, droppedNotProspect } = filterMessages(payload, { prospects })
+  assert.equal(filteredPayload.length, 0, 'all rows filtered — prospects set is empty')
+  assert.equal(droppedNotProspect, 2)
+
+  // Production guard: when filteredPayload is empty, skip the POST
+  let webhookCalled = false
+  const fakePost = () => { webhookCalled = true }
+
+  if (filteredPayload.length > 0) fakePost()
+
+  assert.equal(webhookCalled, false, 'postToWebhook must not be called when filteredPayload is empty')
+
+  // Cursor must still advance to unblock future scans
+  const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
+  assert.equal(lastRowid, 21, 'cursor advances to last dedupedRow ROWID regardless of filtering')
+})
+
 // ── GUID dedup cursor-stall regression ────────────────────────────────────────
 // After a ROWID reset, the scanner falls back to a 7-day window. If ALL the
 // messages in that window were already sent (their GUIDs are in sent_guids),

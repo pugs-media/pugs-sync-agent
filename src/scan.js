@@ -664,7 +664,25 @@ async function main() {
       console.log(`Dropped ${droppedNotProspect + droppedWrongAccount}/${beforeProspect} rows (${droppedNotProspect} not-prospect, ${droppedWrongAccount} wrong-apple-id)`)
     }
 
-    console.log(`Posting ${filteredPayload.length} messages (ROWIDs ${dedupedRows[0].rowid}..${dedupedRows[dedupedRows.length - 1].rowid})`)
+    const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
+
+    if (filteredPayload.length === 0) {
+      // All rows were dropped by the prospect/account filter — nothing to ship.
+      // Advance the cursor so the next scan doesn't re-read the same noise, but
+      // do NOT call postToWebhook: an empty POST is wasteful and, if the webhook
+      // is transiently down, would cause process.exit(4) for a batch with nothing
+      // to send — masking the real health of the scanner.
+      console.log(`All ${dedupedRows.length} rows filtered (${droppedNotProspect} not-prospect, ${droppedWrongAccount} wrong-apple-id) — advancing cursor to ROWID ${lastRowid}, no webhook POST`)
+      try {
+        saveState(STATE_PATH, { ...state, last_rowid: lastRowid, last_run_at: new Date().toISOString() })
+      } catch (e) {
+        const msg = `State save failed after all-filtered cursor advance: ${e.message}`
+        console.error(msg)
+        await reportHealth('scanner', 'error', { errorMessage: msg })
+        process.exit(3)
+      }
+    } else {
+    console.log(`Posting ${filteredPayload.length} messages (ROWIDs ${dedupedRows[0].rowid}..${lastRowid})`)
 
     let webhookResp
     try {
@@ -690,7 +708,6 @@ async function main() {
     // their messages delivered after a ROWID reset recovery. Using dedupedRows would
     // permanently block those messages in sent_guids even though they were never
     // shipped to pugs-sales — a lead-loss risk after a VACUUM or macOS upgrade.
-    const lastRowid = dedupedRows[dedupedRows.length - 1].rowid
     const guidsToAdd = filteredPayload.map(r => r.guid)
     const newSentGuids = [...sentGuids, ...guidsToAdd]
     const MAX_SENT_GUIDS = 10000
@@ -708,6 +725,7 @@ async function main() {
       await reportHealth('scanner', 'error', { errorMessage: msg })
       process.exit(3)
     }
+    } // end if (filteredPayload.length > 0)
     } // end else (rows.length > 0)
   } finally {
     snapshotCleaned = true  // prevent exit handler from double-running
