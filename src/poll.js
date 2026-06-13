@@ -244,27 +244,34 @@ async function processBatch(items, {
 
     try {
       await dispatchToLocalSender(item)
-      // Mark the journal BEFORE reporting so a crash between dispatch and
-      // reportOutcome is recoverable: flushJournal on the next startup will
-      // re-report the outcome without re-sending the iMessage.
-      // If journal mark fails (disk full, permissions), it's a fatal error —
-      // we cannot safely track the dispatch and must not proceed.
-      const markOk = journalMark(item.id)
-      if (!markOk) {
-        throw new Error('journal mark failed — cannot safely track dispatch (disk full? permissions?)')
-      }
-      const reported = await reportOutcome(item.id, { status: 'sent' })
-      // Only clear after cloud confirms receipt. If reportOutcome exhausts retries
-      // (cloud down), the entry stays; the next cycle's flushJournal retries before
-      // fetching the batch — preventing a double-send if the cloud re-delivers the
-      // item as pending before we can report it sent.
-      if (reported) journalClear(item.id)
-      log(`sent ${item.id} → ${item.to_handle}`)
     } catch (e) {
       const msg = e?.message || String(e)
       log(`failed ${item.id}: ${msg}`)
       await reportOutcome(item.id, { status: 'failed', error: msg })
+      continue
     }
+
+    // Message was sent. Mark the journal so a crash between here and
+    // reportOutcome is recoverable via flushJournal on the next startup.
+    // If journal mark fails (disk full, permissions), we cannot recover from a
+    // crash — but we MUST still report 'sent' to the cloud. Reporting 'failed'
+    // instead would cause the cloud to re-queue the item and double-send it,
+    // which is a client-comms error worse than losing crash-recovery ability.
+    const markOk = journalMark(item.id)
+    if (!markOk) {
+      log(`warning ${item.id}: journal mark failed (disk full?) — no crash recovery; reporting sent`)
+      await reportOutcome(item.id, { status: 'sent' })
+      log(`sent (no-journal) ${item.id} → ${item.to_handle}`)
+      continue
+    }
+
+    const reported = await reportOutcome(item.id, { status: 'sent' })
+    // Only clear after cloud confirms receipt. If reportOutcome exhausts retries
+    // (cloud down), the entry stays; the next cycle's flushJournal retries before
+    // fetching the batch — preventing a double-send if the cloud re-delivers the
+    // item as pending before we can report it sent.
+    if (reported) journalClear(item.id)
+    log(`sent ${item.id} → ${item.to_handle}`)
   }
 }
 
