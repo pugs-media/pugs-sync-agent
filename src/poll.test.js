@@ -218,6 +218,48 @@ test('reportOutcome: does not invoke _delay on 4xx fast-fail', async () => {
   assert.equal(delayed, false, '_delay must not be called on permanent 4xx')
 })
 
+// ---------------------------------------------------------------------------
+// reportOutcome permanent 4xx: return value pins the journal-clear contract
+//
+// On a permanent 4xx (401/403/404), reportOutcome must return TRUE — even
+// though the cloud didn't confirm — because these statuses mean the cloud
+// will NEVER accept a retry. If it returned false instead, flushJournal would
+// log "journal entry kept, will retry on next cycle" for every future poll
+// cycle: an infinite loop that permanently consumes queue slots and starves
+// new outbound messages. The return value is what processBatch/flushJournal
+// use to decide whether to clear the journal entry — it must be pinned.
+// ---------------------------------------------------------------------------
+
+test('reportOutcome: returns true on 401 — permanent error means safe to clear journal (no retry will succeed)', async () => {
+  const result = await reportOutcome('id-perm-401', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' }),
+    _delay: noDelay,
+  })
+  assert.equal(result, true, '401 must return true so the caller clears the journal — false would cause infinite flush-journal loop')
+})
+
+test('reportOutcome: returns true on 403 — permanent error means safe to clear journal (no retry will succeed)', async () => {
+  const result = await reportOutcome('id-perm-403', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 403, text: async () => 'Forbidden' }),
+    _delay: noDelay,
+  })
+  assert.equal(result, true, '403 must return true so the caller clears the journal — false would cause infinite flush-journal loop')
+})
+
+test('reportOutcome: returns true on 404 — queue item reaped/expired, journal must be cleared to unblock dispatch', async () => {
+  // The most realistic production scenario: item was dispatched (iMessage sent)
+  // but the cloud expired the queue row before we could POST the outcome. The
+  // cloud returns 404. If reportOutcome returns false, flushJournal retries on
+  // every subsequent poll cycle — permanently blocking that journal slot — while
+  // the cloud never re-delivers the item (it's gone). Returning true clears the
+  // entry and lets the queue drain normally.
+  const result = await reportOutcome('id-perm-404', { status: 'sent' }, {
+    _fetch: async () => ({ ok: false, status: 404, text: async () => 'Not Found' }),
+    _delay: noDelay,
+  })
+  assert.equal(result, true, '404 must return true so the caller clears the journal — false would permanently block the dispatch queue')
+})
+
 test('reportOutcome: retries on 408 (request timeout) like a transient error', async () => {
   let calls = 0
   await reportOutcome('id-9', { status: 'sent' }, {
