@@ -10,7 +10,7 @@ const fs       = require('fs')
 const path     = require('path')
 const os       = require('os')
 const Database = require('better-sqlite3')
-const { fetchProspectHandles, parseProspectHandles, fetchOrCachedProspects, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts } = require('./scan')
+const { fetchProspectHandles, parseProspectHandles, fetchOrCachedProspects, postToWebhook, sendHeartbeat, parseNewDraftsCount, serializeProspects, contactsBase, assertChatDbSchema, detectAndRecoverRowidReset, queryNewMessages, shouldSyncContacts, computeAllDedupCursorRowid } = require('./scan')
 
 const NOOP_DELAY = async () => {}
 
@@ -1102,55 +1102,34 @@ test('GUID dedup: deduped rows are not passed to normalizeRows (no double-send)'
 // The fix: a third branch `rows.length > 0 && dedupedRows.length === 0` advances
 // the cursor to rows[rows.length-1].rowid without sending anything to the cloud.
 
-test('GUID dedup cursor stall: when all rows are GUID-deduped, cursor should advance to unblock new messages', () => {
-  // Simulate: 3 rows returned from chat.db, all with GUIDs already in sent_guids.
-  // This is the post-ROWID-reset scenario: macOS VACUUM reset ROWIDs 1-3 map to
-  // messages that were already sent before the reset (same GUIDs, new ROWIDs).
-  const rows = [
-    { rowid: 1, guid: 'old-guid-1' },
-    { rowid: 2, guid: 'old-guid-2' },
-    { rowid: 3, guid: 'old-guid-3' },
-  ]
-  const sentGuids = new Set(['old-guid-1', 'old-guid-2', 'old-guid-3'])
+// ── computeAllDedupCursorRowid ────────────────────────────────────────────────
+// These tests call the production function directly. The old tests for this
+// path only asserted math about local variables (e.g. `rows.length === 3`) and
+// never invoked any production code — deleting the else-if branch from main()
+// would not have caused them to fail. These tests actually guard the branch
+// condition and cursor formula.
 
-  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
-
-  // The all-deduped condition triggers the cursor-advance branch
-  assert.equal(rows.length, 3, 'rows are present')
-  assert.equal(dedupedRows.length, 0, 'all rows were GUID-deduped')
-  assert.equal(rows.length > 0 && dedupedRows.length === 0, true, 'cursor-stall branch condition must be true')
-
-  // The cursor should advance to the last row's ROWID
-  const expectedCursor = rows[rows.length - 1].rowid
-  assert.equal(expectedCursor, 3, 'cursor must advance to ROWID 3 (last row) to unblock new messages')
+test('computeAllDedupCursorRowid: returns last rowid when all rows are GUID-deduped', () => {
+  // Post-ROWID-reset scenario: batch of 3 rows, all GUIDs already sent.
+  // The scanner must advance the cursor to ROWID 3 to unblock future messages.
+  const rows       = [{ rowid: 1 }, { rowid: 2 }, { rowid: 3 }]
+  const dedupedRows = []
+  assert.equal(computeAllDedupCursorRowid(rows, dedupedRows), 3,
+    'must return the last rowid to advance the cursor past all deduped rows')
 })
 
-test('GUID dedup cursor stall: partial dedup does NOT trigger the advance-only branch', () => {
-  // If some rows survive GUID dedup, the normal processing branch handles them.
-  const rows = [
-    { rowid: 1, guid: 'old-guid-1' },  // already sent
-    { rowid: 2, guid: 'new-guid-2' },  // new
-  ]
-  const sentGuids = new Set(['old-guid-1'])
-
-  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
-
-  // Normal processing branch should fire (dedupedRows.length > 0)
-  assert.equal(dedupedRows.length, 1, 'one row survives dedup')
-  assert.equal(rows.length > 0 && dedupedRows.length === 0, false, 'advance-only branch must NOT fire when some rows survive')
+test('computeAllDedupCursorRowid: returns null when some rows survive dedup', () => {
+  // Normal branch handles partially-deduped batches; advance-only must not fire.
+  const rows       = [{ rowid: 1 }, { rowid: 2 }]
+  const dedupedRows = [{ rowid: 2 }]
+  assert.equal(computeAllDedupCursorRowid(rows, dedupedRows), null,
+    'must return null when dedupedRows is non-empty — normal processing branch applies')
 })
 
-test('GUID dedup cursor stall: heartbeat branch fires only when no rows at all', () => {
-  // The heartbeat (empty POST) is only for "zero rows from chat.db".
-  // When rows exist but all are GUID-deduped, we advance the cursor — NOT send a heartbeat.
-  const rows = []
-  const sentGuids = new Set(['old-guid-1'])
-  const dedupedRows = rows.filter(row => !sentGuids.has(row.guid))
-
-  // Heartbeat condition: BOTH arrays empty
-  assert.equal(!dedupedRows.length && !rows.length, true, 'heartbeat branch fires when no rows at all')
-  // Advance-only branch must NOT fire when rows is empty (no cursor to advance)
-  assert.equal(rows.length > 0 && dedupedRows.length === 0, false, 'advance-only branch must NOT fire when rows is empty')
+test('computeAllDedupCursorRowid: returns null when rows is empty (heartbeat case)', () => {
+  // Zero rows from chat.db → heartbeat branch, not cursor-advance.
+  assert.equal(computeAllDedupCursorRowid([], []), null,
+    'must return null when rows is empty — cursor-advance requires at least one row')
 })
 
 // ── shouldSyncContacts ────────────────────────────────────────────────────────
