@@ -81,12 +81,24 @@ if [ -f "$SCANNER_LOG" ]; then
 
   if [ "$watchdog_fire" -eq 1 ]; then
     echo "$LOG_PREFIX WATCHDOG $watchdog_reason — running panic-restart.sh"
-    bash "$AGENT_ROOT/panic-restart.sh" 2>&1 | sed "s|^|$LOG_PREFIX panic: |"
+    # Capture output before piping through sed so panic-restart.sh's exit code
+    # is not swallowed. A pipe always checks the rightmost process (sed, always 0)
+    # — if panic-restart.sh fails (npm install, launchctl, etc.) the pipe form
+    # silently exits 0 and update.sh declares "done" even though the scanner is
+    # still stalled. Mirrors the same fix applied in panic-restart.sh step 5.
+    panic_out=$(bash "$AGENT_ROOT/panic-restart.sh" 2>&1)
+    panic_rc=$?
+    echo "$panic_out" | sed "s|^|$LOG_PREFIX panic: |"
+    if [ "$panic_rc" -ne 0 ]; then
+      echo "$LOG_PREFIX WATCHDOG self-heal FAILED (exit $panic_rc) — scanner may still be stalled, manual intervention may be needed"
+    fi
 
     # Beacon to pugs-sales so Charlie sees the self-heal fire in Vercel logs.
-    # Best-effort (no -f, no retry, 5s timeout) — recovery already succeeded
-    # locally; the POST is purely for observability. Repeated fires = genuine
-    # broken state that self-heal isn't curing → Charlie should investigate.
+    # self_heal_ok distinguishes "watchdog fired + recovered" from "watchdog fired
+    # but panic-restart.sh itself failed" — both are important for diagnosis.
+    # Best-effort (no -f, no retry, 5s timeout) — the observability POST must not
+    # block or error-out the main updater path. Repeated fires = genuine broken
+    # state that self-heal isn't curing → Charlie should investigate.
     if [ -f "$AGENT_ROOT/.env" ]; then
       # shellcheck disable=SC1091
       . "$AGENT_ROOT/.env"
@@ -96,11 +108,12 @@ if [ -f "$SCANNER_LOG" ]; then
         # Using cut avoids depending on a specific path suffix (/api/import/imessage)
         # that would silently break for staging URLs or future path changes.
         BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
+        self_heal_ok=$([ "$panic_rc" -eq 0 ] && echo true || echo false)
         curl -sS -m 5 -X POST "$BASE_URL/api/sync/watchdog-fired" \
           -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
           -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
           -H "content-type: application/json" \
-          -d "{\"reason\":\"$watchdog_reason\",\"age_seconds\":$age}" \
+          -d "{\"reason\":\"$watchdog_reason\",\"age_seconds\":$age,\"self_heal_ok\":$self_heal_ok}" \
           >/dev/null 2>&1 \
           && echo "$LOG_PREFIX WATCHDOG beacon sent to pugs-sales" \
           || echo "$LOG_PREFIX WATCHDOG beacon failed (non-fatal)"
