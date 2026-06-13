@@ -113,3 +113,39 @@ test('sent_guids tracks filteredPayload GUIDs (actually sent), not dedupedRows (
     'scan.js must NOT use dedupedRows.map(r => r.guid) — that incorrectly marks un-sent messages as sent'
   )
 })
+
+test('cursor advances to dedupedRows last rowid (not filteredPayload) — handles all-prospect-filtered batch', () => {
+  // The cursor formula MUST use dedupedRows[dedupedRows.length - 1].rowid, NOT
+  // filteredPayload[filteredPayload.length - 1]?.rowid.
+  //
+  // Why: the most common scan path is Connor having non-prospect conversations in his
+  // inbox. normalizeRows produces N rows; filterMessages drops all of them (no prospects
+  // among the senders). filteredPayload is therefore empty. If the cursor formula used
+  // filteredPayload[last], it would either crash (undefined.rowid) or — with optional
+  // chaining — silently return undefined, leaving the cursor at its OLD position.
+  //
+  // A cursor that never advances means the same 200-row batch is re-read every 5 min,
+  // blocking ALL messages from higher ROWIDs — including genuine prospect leads that
+  // arrive later. The scanner would appear healthy (heartbeats succeed, no crash) while
+  // silently losing every new lead.
+  //
+  // The fix is to always key the cursor on dedupedRows (what was examined), so the cursor
+  // advances regardless of filtering. GUIDs of un-sent messages are simply not added to
+  // sent_guids (the filteredPayload formula), so they stay re-deliverable after a ROWID reset.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  assert.ok(
+    scanCode.includes('dedupedRows[dedupedRows.length - 1].rowid'),
+    'scan.js must advance the cursor using dedupedRows[last].rowid so a batch where all rows are ' +
+    'prospect-filtered (filteredPayload=[]) still advances the cursor — not filteredPayload[last]?.rowid, ' +
+    'which would stall the cursor and silently block all subsequent leads'
+  )
+  // Belt-and-suspenders: confirm filteredPayload is not used for the cursor rowid.
+  // filteredPayload.length - 1 access pattern on an empty array would return undefined
+  // and silently leave the cursor un-advanced.
+  assert.ok(
+    !scanCode.includes('filteredPayload[filteredPayload.length - 1]'),
+    'scan.js must NOT derive the cursor rowid from filteredPayload — when filteredPayload is ' +
+    'empty (all rows prospect-filtered) that expression is undefined and the cursor stalls'
+  )
+})
