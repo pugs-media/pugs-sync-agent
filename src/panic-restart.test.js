@@ -50,3 +50,29 @@ test('panic-restart.sh: calls npm install after pulling code', () => {
     'npm install should be called after git operations'
   )
 })
+
+test('panic-restart.sh: step 5 captures scanner exit code — not tail exit code', () => {
+  // Bug: `if node ... | tail -10` checks tail's exit code (always 0), not node's.
+  // A scanner that exits 2/3/4 would still print "✓ scanner ran cleanly" — false
+  // assurance during an emergency recovery when Charlie is diagnosing a stall.
+  // Fix: capture to variable, check $? before piping through tail.
+  const src = fs.readFileSync('panic-restart.sh', 'utf8')
+
+  // Must NOT pipe node directly into the if-condition (that swallows node's exit code)
+  assert.ok(
+    !src.match(/if\s+"\$NODE_BIN"[^\n]*\|\s*tail/),
+    'step 5 must not pipe node into tail inside an if-condition — that checks tail exit code (always 0), not node exit code'
+  )
+
+  // Must capture exit code separately (scan_rc=$?)
+  assert.ok(
+    src.includes('scan_rc=$?'),
+    'step 5 must capture scanner exit code via scan_rc=$? so a failed scan is correctly diagnosed'
+  )
+
+  // Must branch on the captured exit code, not the pipe result
+  assert.ok(
+    src.includes('[ "$scan_rc" -eq 0 ]'),
+    'step 5 must branch on $scan_rc (captured node exit code), not the pipe result'
+  )
+})

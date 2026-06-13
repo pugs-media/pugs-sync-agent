@@ -65,10 +65,13 @@ done
 
 echo
 echo "━━ 5. Running scanner once synchronously ━━"
-if "$NODE_BIN" "$AGENT_ROOT/src/scan.js" 2>&1 | tail -10; then
+scan_out=$("$NODE_BIN" "$AGENT_ROOT/src/scan.js" 2>&1)
+scan_rc=$?
+echo "$scan_out" | tail -10
+if [ "$scan_rc" -eq 0 ]; then
   echo "   ✓ scanner ran cleanly"
 else
-  echo "   ❌ scanner errored — check $AGENT_ROOT/scanner.error.log"
+  echo "   ❌ scanner errored (exit $scan_rc) — check $AGENT_ROOT/scanner.error.log"
   tail -20 "$AGENT_ROOT/scanner.error.log" 2>/dev/null
 fi
 
