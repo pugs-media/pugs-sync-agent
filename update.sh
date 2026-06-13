@@ -63,14 +63,17 @@ if [ -f "$SCANNER_LOG" ]; then
     watchdog_reason="scanner.log stale (${age}s old)"
   else
     # Check for a recent successful run. The grep is greedy on purpose:
-    # any of "Webhook OK", "sending heartbeat", "Posting N messages", or
-    # "GUID-deduped" within the last 200 lines is a sign of life.
-    # "GUID-deduped" covers the post-ROWID-reset cursor-advance path — the
-    # scanner runs clean but prints neither Webhook OK nor heartbeat while
-    # paging through an already-sent backlog. Without this, a healthy scanner
-    # in that state would trip the watchdog after 30 min. tail-then-grep is
-    # cheap even when the log is huge.
-    if ! tail -200 "$SCANNER_LOG" 2>/dev/null | grep -qE "Webhook OK|sending heartbeat|Posting [0-9]+ messages|GUID-deduped"; then
+    # any of "Webhook OK", "sending heartbeat", "Posting N messages",
+    # "GUID-deduped", or "no webhook POST" within the last 200 lines is a
+    # sign of life.
+    # "GUID-deduped" covers the post-ROWID-reset cursor-advance path.
+    # "no webhook POST" covers the all-prospect-filtered path: when every
+    # new iMessage is from a non-prospect (family, friends, spam), the
+    # scanner advances the cursor without POSTing. This is a healthy run,
+    # but previously logged nothing that matched the watchdog — causing a
+    # false panic-restart after 30min of personal-message bursts.
+    # tail-then-grep is cheap even when the log is huge.
+    if ! tail -200 "$SCANNER_LOG" 2>/dev/null | grep -qE "Webhook OK|sending heartbeat|Posting [0-9]+ messages|GUID-deduped|no webhook POST"; then
       watchdog_fire=1
       watchdog_reason="scanner.log fresh but no recent success line — crash-loop suspected"
     fi
