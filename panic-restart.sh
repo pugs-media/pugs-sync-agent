@@ -80,3 +80,9 @@ echo "━━ Done ━━"
 echo "Verify in pugs-sales: curl -H \"Authorization: Bearer \$CRON_SECRET\" \\"
 echo "  https://pugs-sales.vercel.app/api/admin/diagnose-imessage | jq .heartbeat"
 echo "Should show a recent timestamp within 1 minute."
+
+# Exit with the scanner's exit code so update.sh's watchdog can distinguish
+# a successful self-heal (scanner ran cleanly) from a failed one (scanner still
+# erroring). Without this, panic_rc in update.sh is always 0, self_heal_ok is
+# always true, and the cloud beacon never reflects a broken scanner.
+exit $scan_rc
