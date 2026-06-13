@@ -174,6 +174,29 @@ test('update.sh: watchdog skips entirely when scanner.log does not exist (preven
 
 // ── watchdog beacon ──────────────────────────────────────────────────────────
 
+// ── BASE_URL origin derivation ────────────────────────────────────────────────
+
+test('update.sh: BASE_URL uses URL-origin extraction (not hardcoded path-suffix removal)', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // The original pattern `${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}` silently
+  // fails for non-standard URL formats (staging URLs, future path changes): the
+  // suffix match is exact, so a URL like https://staging.pugs.media/webhook/imessage
+  // would keep the full path and send health beacons to the wrong endpoint.
+  // The fix uses `cut -d/ -f1-3` — same URL-origin extraction as scan.js's
+  // `new URL(webhookUrl).origin`: scheme + host, no path, works for any URL shape.
+  assert.ok(
+    !src.includes('%/api/import/imessage'),
+    'BASE_URL must not be derived by stripping a hardcoded /api/import/imessage suffix — ' +
+    'that silently fails for non-standard URL formats (staging, future path changes). ' +
+    'Use cut -d/ -f1-3 or equivalent origin extraction.'
+  )
+  assert.ok(
+    src.includes('cut -d/ -f1-3'),
+    'BASE_URL must be derived from the URL origin using cut -d/ -f1-3 ' +
+    '(scheme+host, correct for any URL shape regardless of path format)'
+  )
+})
+
 test('update.sh: watchdog beacon body uses $watchdog_reason (not hardcoded "scanner.log stale")', () => {
   const src = fs.readFileSync(UPDATE_SH, 'utf8')
   // The watchdog fires for two distinct reasons:

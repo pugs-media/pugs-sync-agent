@@ -88,8 +88,11 @@ if [ -f "$SCANNER_LOG" ]; then
       # shellcheck disable=SC1091
       . "$AGENT_ROOT/.env"
       if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
-        # Derive base URL from PUGS_SYNC_WEBHOOK_URL (strip /api/import/imessage)
-        BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+        # Derive base URL from PUGS_SYNC_WEBHOOK_URL — same URL-origin extraction
+        # as scan.js's new URL(webhookUrl).origin: scheme + host, no path suffix.
+        # Using cut avoids depending on a specific path suffix (/api/import/imessage)
+        # that would silently break for staging URLs or future path changes.
+        BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
         curl -sS -m 5 -X POST "$BASE_URL/api/sync/watchdog-fired" \
           -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
           -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
@@ -145,7 +148,7 @@ if ! npm_out=$(timeout 30 npm install --loglevel error --no-audit --no-fund 2>&1
     # shellcheck disable=SC1091
     . "$AGENT_ROOT/.env"
     if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
-      BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+      BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
       curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
         -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
         -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
@@ -180,7 +183,7 @@ if [ "$reload_failed" -eq 1 ]; then
     # shellcheck disable=SC1091
     . "$AGENT_ROOT/.env"
     if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
-      BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+      BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
       curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
         -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
         -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
@@ -199,7 +202,7 @@ if [ -f "$AGENT_ROOT/.env" ]; then
   # shellcheck disable=SC1091
   . "$AGENT_ROOT/.env"
   if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
-    BASE_URL="${PUGS_SYNC_WEBHOOK_URL%/api/import/imessage}"
+    BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
     curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
       -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
       -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
