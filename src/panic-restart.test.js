@@ -51,6 +51,26 @@ test('panic-restart.sh: calls npm install after pulling code', () => {
   )
 })
 
+test('panic-restart.sh: exits with scanner exit code so update.sh watchdog gets accurate self_heal_ok', () => {
+  // Bug: panic-restart.sh captured scan_rc but never used it as the script exit code.
+  // update.sh reads panic_rc=$? to set self_heal_ok in the cloud beacon. If
+  // panic-restart.sh exits 0 unconditionally, self_heal_ok is always true — even
+  // when the scanner is still broken after the self-heal. PR #125 fixed the pipe
+  // swallowing the exit code in update.sh; this fixes the source.
+  const src = fs.readFileSync('panic-restart.sh', 'utf8')
+  assert.ok(
+    src.includes('exit $scan_rc'),
+    'panic-restart.sh must exit with $scan_rc so update.sh watchdog can set self_heal_ok correctly'
+  )
+  // exit $scan_rc must come after the scan_rc=$? assignment
+  const scanRcAssignIdx = src.indexOf('scan_rc=$?')
+  const exitIdx = src.indexOf('exit $scan_rc')
+  assert.ok(
+    scanRcAssignIdx !== -1 && exitIdx !== -1 && exitIdx > scanRcAssignIdx,
+    'exit $scan_rc must come after scan_rc=$? capture'
+  )
+})
+
 test('panic-restart.sh: step 5 captures scanner exit code — not tail exit code', () => {
   // Bug: `if node ... | tail -10` checks tail's exit code (always 0), not node's.
   // A scanner that exits 2/3/4 would still print "✓ scanner ran cleanly" — false
