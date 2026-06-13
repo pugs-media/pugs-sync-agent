@@ -150,6 +150,38 @@ test('classify: outbound from a stranger iCloud into a prospect group is STILL d
   assert.deepEqual(res, { keep: false, reason: 'wrong-apple-id' })
 })
 
+test('classify: outbound from configured iCloud into a prospect group is kept (Connor engaging a sales-relevant room)', () => {
+  // is_from_me=1 does NOT bypass the group-prospect check — groups are gated on
+  // whether any participant is allowlisted, regardless of who sent the message.
+  // Without this guard, a refactor that short-circuits group classification for
+  // outbound rows would silently drop Connor's messages from group threads in
+  // pugs-sales, losing engagement history for multi-stakeholder deals.
+  const handleAllowed = makeHandleAllowed(prospects())
+  const r = row({
+    is_from_me: 1,
+    account: 'iMessage;-;connor@icloud.com',
+    chat_kind: 'group',
+    chat_participants: ['+14155550100', '+19998887777'], // one prospect present
+  })
+  const res = classifyMessage(r, { handleAllowed, expectedAppleId: 'connor@icloud.com' })
+  assert.deepEqual(res, { keep: true, reason: 'group-prospect' })
+})
+
+test('classify: outbound from configured iCloud into a personal group is dropped (group filter applies to outbound too)', () => {
+  // Even Connor's own messages are not shipped when no prospect is in the room.
+  // Prevents personal group chats (family, friends) from leaking to pugs-sales
+  // merely because Connor is the sender.
+  const handleAllowed = makeHandleAllowed(prospects())
+  const r = row({
+    is_from_me: 1,
+    account: 'iMessage;-;connor@icloud.com',
+    chat_kind: 'group',
+    chat_participants: ['+19998887777', '+18001112222'], // no prospects
+  })
+  const res = classifyMessage(r, { handleAllowed, expectedAppleId: 'connor@icloud.com' })
+  assert.deepEqual(res, { keep: false, reason: 'not-prospect' })
+})
+
 // ── filterMessages: batch + drop accounting ─────────────────────────────────
 
 test('filterMessages: keeps only in-scope rows and reports accurate drop counts', () => {
