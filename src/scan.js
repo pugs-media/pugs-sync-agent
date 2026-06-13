@@ -151,39 +151,51 @@ function shouldSyncContacts(lastContactsAt, newDraftsThisRun, { now = Date.now()
  * lead-loss risk.
  */
 async function fetchOrCachedProspects({
-  webhookUrl = WEBHOOK_URL,
-  secret     = SECRET,
-  scannerId  = SCANNER_ID,
-  statePath  = STATE_PATH,
+  webhookUrl  = WEBHOOK_URL,
+  secret      = SECRET,
+  scannerId   = SCANNER_ID,
+  statePath   = STATE_PATH,
   _fetch,
   _delay,
   _timeoutMs,
+  _saveState  = saveState,
 } = {}) {
   const fetchOpts = { webhookUrl, secret, scannerId }
   if (_fetch     !== undefined) fetchOpts._fetch     = _fetch
   if (_delay     !== undefined) fetchOpts._delay     = _delay
   if (_timeoutMs !== undefined) fetchOpts._timeoutMs = _timeoutMs
 
+  let prospects
   try {
-    const prospects = await fetchProspectHandles(fetchOpts)
-    const stateForCache = loadState(statePath)
-    saveState(statePath, { ...stateForCache, cached_prospects: serializeProspects(prospects) })
-    return prospects
+    prospects = await fetchProspectHandles(fetchOpts)
   } catch (fetchErr) {
     const stateForCache = loadState(statePath)
     const cache = stateForCache.cached_prospects
     if (cache) {
-      let prospects
+      let cachedProspects
       try {
-        prospects = parseProspectHandles(cache)
+        cachedProspects = parseProspectHandles(cache)
       } catch (cacheErr) {
         throw new Error(`Failed to fetch prospect allowlist and cached allowlist is invalid — halting scan. fetch: ${fetchErr.message}; cache: ${cacheErr.message}`)
       }
-      console.warn(`Could not reach prospect-handles endpoint (${fetchErr.message}) — using cached allowlist (${prospects.phones.size} phones + ${prospects.emails.size} emails)`)
-      return prospects
+      console.warn(`Could not reach prospect-handles endpoint (${fetchErr.message}) — using cached allowlist (${cachedProspects.phones.size} phones + ${cachedProspects.emails.size} emails)`)
+      return cachedProspects
     }
     throw new Error(`Failed to fetch prospect allowlist — halting scan (no cache available). ${fetchErr.message}`)
   }
+
+  // Persist the fresh allowlist to state.json so it's available as a cache
+  // fallback on the next run if the cloud is temporarily unreachable. A save
+  // failure (disk full, permissions) must not mask the fresh fetch — use the
+  // fresh data for this run and log a warning so the failure is visible.
+  try {
+    const stateForCache = loadState(statePath)
+    _saveState(statePath, { ...stateForCache, cached_prospects: serializeProspects(prospects) })
+  } catch (saveErr) {
+    console.warn(`fetchOrCachedProspects: could not cache fresh allowlist — ${saveErr.message}. Fresh data used this run; cache will not reflect latest allowlist.`)
+  }
+
+  return prospects
 }
 
 // ───────────────────────────────────────────────────────────────────────
