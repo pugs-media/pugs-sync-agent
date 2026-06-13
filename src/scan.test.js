@@ -1090,6 +1090,46 @@ test('GUID dedup: deduped rows are not passed to normalizeRows (no double-send)'
   // This ensures that dedupedRows is the input to normalization, not rows.
 })
 
+test('scan: prospect-filtered row GUIDs are NOT added to sent_guids — preserves re-delivery if sender later joins allowlist', () => {
+  // Production formula: guidsToAdd = filteredPayload.map(r => r.guid)
+  // NOT: guidsToAdd = dedupedRows.map(r => r.guid)
+  //
+  // When inbound messages survive GUID dedup but fail the prospect filter, their
+  // GUIDs must stay out of sent_guids. If they were added, a post-ROWID-reset
+  // recovery would skip them via GUID dedup — even though they were never sent to
+  // pugs-sales — permanently blocking delivery if the sender later becomes a
+  // prospect. That is a silent lead-loss on a sales tool.
+  const { normalizeRows } = require('./payload')
+  const { filterMessages } = require('./filter')
+
+  const VALID_DATE = 1609459200000000000  // well-formed Apple timestamp
+
+  const dedupedRows = [
+    { rowid: 10, guid: 'np-guid-1', text: 'hey', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550100',
+      chat_guid: 'iMessage;-;+15555550100', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550100' },
+    { rowid: 11, guid: 'np-guid-2', text: 'ping', date: VALID_DATE,
+      is_from_me: 0, service: 'iMessage', account: null, handle: '5555550100',
+      chat_guid: 'iMessage;-;+15555550100', chat_display_name: null,
+      participant_count: 1, chat_participants_concat: '5555550100' },
+  ]
+
+  const payload = normalizeRows(dedupedRows)
+  assert.equal(payload.length, 2, 'both rows must survive normalizeRows')
+
+  const prospects = { phones: new Set(), emails: new Set() }
+  const { kept: filteredPayload, droppedNotProspect } = filterMessages(payload, { prospects })
+  assert.equal(filteredPayload.length, 0, 'both rows must be filtered by empty prospect allowlist')
+  assert.equal(droppedNotProspect, 2)
+
+  // Production formula — must use filteredPayload, not dedupedRows
+  const guidsToAdd = filteredPayload.map(r => r.guid)
+  assert.equal(guidsToAdd.length, 0, 'non-prospect GUIDs must not be added to sent_guids')
+  assert.ok(!guidsToAdd.includes('np-guid-1'), 'np-guid-1 must not enter sent_guids')
+  assert.ok(!guidsToAdd.includes('np-guid-2'), 'np-guid-2 must not enter sent_guids')
+})
+
 // ── GUID dedup cursor-stall regression ────────────────────────────────────────
 // After a ROWID reset, the scanner falls back to a 7-day window. If ALL the
 // messages in that window were already sent (their GUIDs are in sent_guids),
