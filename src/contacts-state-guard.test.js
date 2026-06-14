@@ -69,3 +69,38 @@ test('contacts-sync failure: reports health=error when syncContacts returns ok:f
     "an undefined reason makes triage harder than a clear fallback string"
   )
 })
+
+test('contacts-sync throw: reports health=error when syncContacts throws (prevents silent enrichment-crash invisibility)', () => {
+  // syncContacts() can THROW (not just return ok:false) when postContactsPayload
+  // exhausts all retries while real address books are present — the error propagates
+  // through the try/finally in contacts.js and is caught by scan.js's outer catch.
+  // That catch block calls reportHealth(error) so the dashboard shows the failure.
+  //
+  // This is a separate code path from the ok:false return path tested above:
+  //   ok:false → line ~772 "contacts sync failed: ..."
+  //   throw    → line ~777 "contacts sync threw: ..."
+  //
+  // The existing test only checks that 'contacts sync failed' exists (the ok:false
+  // branch). A refactor that removes the reportHealth from the catch block would
+  // pass that test while silently breaking throw-path observability.
+  const scanCode = fs.readFileSync(path.join(__dirname, 'scan.js'), 'utf8')
+
+  // The catch block must include the 'contacts sync threw:' marker so the cloud
+  // dashboard receives a named error rather than stale-ok status.
+  assert.ok(
+    scanCode.includes('contacts sync threw:'),
+    'scan.js catch block must include "contacts sync threw:" in the reportHealth message — ' +
+    'removing it (or the whole reportHealth call) makes a thrown syncContacts invisible on the dashboard'
+  )
+
+  // reportHealth must appear in the catch block, close to the throw marker.
+  // Guard the association, not just the individual strings, so they can't drift apart.
+  const throwIdx = scanCode.indexOf('contacts sync threw:')
+  assert.ok(throwIdx !== -1, '"contacts sync threw:" must exist in scan.js')
+  const reportHealthBeforeThrow = scanCode.lastIndexOf("reportHealth('scanner', 'error'", throwIdx)
+  assert.ok(
+    reportHealthBeforeThrow !== -1 && throwIdx - reportHealthBeforeThrow < 300,
+    'scan.js must call reportHealth(scanner, error) immediately before "contacts sync threw:" — ' +
+    'the catch block must report the thrown error so the cloud sees a health=error, not stale ok'
+  )
+})
