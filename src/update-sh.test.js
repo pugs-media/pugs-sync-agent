@@ -240,6 +240,84 @@ test('update.sh: watchdog beacon includes self_heal_ok field so pugs-sales can d
   )
 })
 
+// ── deploy-stall health beacons ──────────────────────────────────────────────────
+// When a deploy step fails (git fetch, git merge, npm install, launchctl load),
+// update.sh must report the failure to the cloud health endpoint so Charlie sees
+// the deploy-stall from the dashboard. Silent exits leave the agent stale and
+// undeployable with no diagnostic signal.
+
+test('update.sh: git fetch failure reports health=error beacon to cloud', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // Verify the git fetch failure path includes a health beacon POST
+  const fetchFailBlock = src.match(/(timeout 30 git fetch[\s\S]*?)exit 0/)
+  assert.ok(fetchFailBlock, 'git fetch failure block must be present')
+  assert.ok(
+    fetchFailBlock[1].includes('/api/sync/health'),
+    'git fetch failure block must POST a health beacon to the cloud'
+  )
+  assert.ok(
+    fetchFailBlock[1].includes('"git fetch failed"'),
+    'git fetch failure health beacon must report "git fetch failed" as the error'
+  )
+})
+
+test('update.sh: git merge failure reports health=error beacon to cloud', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  // Verify the git merge failure path includes a health beacon POST
+  const mergeFailBlock = src.match(/(git merge[\s\S]*?)exit 0/)
+  // There are two exit 0 after the merge block. Grab the merge block specifically.
+  // The merge block is the one containing "fast-forward merge failed"
+  const mergeBlockLines = src.split('\n').filter(l => l.includes('fast-forward merge failed'))
+  assert.ok(mergeBlockLines.length > 0, 'must have a "fast-forward merge failed" log line')
+
+  // Verify the block from "git merge --ff-only" through its exit 0
+  const mergeStart = src.indexOf('git merge --ff-only origin/main 2>&1')
+  const mergeEnd = src.indexOf('exit 0', mergeStart) + 'exit 0'.length
+  const mergeBlock = src.slice(mergeStart, mergeEnd)
+
+  assert.ok(
+    mergeBlock.includes('/api/sync/health'),
+    'git merge failure block must POST a health beacon to the cloud'
+  )
+  assert.ok(
+    mergeBlock.includes('"git merge failed"'),
+    'git merge failure health beacon must report "git merge failed" as the error'
+  )
+})
+
+test('update.sh: git merge failure health beacon is AFTER merge output capture (not before)', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const mergeDetailIdx = src.indexOf('merge detail:')
+  const mergeBeaconIdx = src.indexOf('"git merge failed"')
+  assert.ok(
+    mergeDetailIdx < mergeBeaconIdx,
+    'health beacon must come AFTER the merge detail log line so the merge reason is captured first'
+  )
+})
+
+test('update.sh: git fetch failure health beacon uses same BASE_URL/cut pattern as other health beacons', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const fetchFailBlock = src.match(/(timeout 30 git fetch[\s\S]*?)exit 0/)
+  assert.ok(fetchFailBlock, 'git fetch failure block must be present')
+
+  assert.ok(
+    fetchFailBlock[1].includes('cut -d/ -f1-3'),
+    'git fetch failure health beacon must use cut -d/ -f1-3 for BASE_URL derivation (not hardcoded path stripping)'
+  )
+})
+
+test('update.sh: git merge failure health beacon uses same BASE_URL/cut pattern as other health beacons', () => {
+  const src = fs.readFileSync(UPDATE_SH, 'utf8')
+  const mergeStart = src.indexOf('git merge --ff-only origin/main 2>&1')
+  const mergeEnd = src.indexOf('exit 0', mergeStart) + 'exit 0'.length
+  const mergeBlock = src.slice(mergeStart, mergeEnd)
+
+  assert.ok(
+    mergeBlock.includes('cut -d/ -f1-3'),
+    'git merge failure health beacon must use cut -d/ -f1-3 for BASE_URL derivation'
+  )
+})
+
 // ── BASE_URL origin derivation ────────────────────────────────────────────────
 
 test('update.sh: BASE_URL uses URL-origin extraction (not hardcoded path-suffix removal)', () => {
