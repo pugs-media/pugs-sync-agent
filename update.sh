@@ -133,6 +133,20 @@ OLD_HEAD=$(git rev-parse HEAD 2>/dev/null || echo unknown)
 # fetch but tight enough to fail fast on SSH stalls or network hangs.
 if ! timeout 30 git fetch --quiet 2>&1; then
   echo "$LOG_PREFIX git fetch failed (network? auth? timeout?), bailing"
+  # Report the failure to the cloud so Charlie sees the deploy-stall
+  if [ -f "$AGENT_ROOT/.env" ]; then
+    # shellcheck disable=SC1091
+    . "$AGENT_ROOT/.env"
+    if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
+      BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
+      curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
+        -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
+        -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
+        -H "content-type: application/json" \
+        -d '{"service":"updater","status":"error","error":"git fetch failed"}' \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   exit 0
 fi
 
@@ -142,6 +156,20 @@ if [ $? -ne 0 ]; then
   # We don't auto-resolve — Connor or Charlie has to sort it.
   echo "$LOG_PREFIX fast-forward merge failed (local changes or diverged), bailing"
   echo "$LOG_PREFIX merge detail: $(echo "$merge_out" | head -5 | tr '\n' '|')"
+  # Report the failure to the cloud so Charlie sees the deploy-stall
+  if [ -f "$AGENT_ROOT/.env" ]; then
+    # shellcheck disable=SC1091
+    . "$AGENT_ROOT/.env"
+    if [ -n "${PUGS_SYNC_SECRET:-}" ] && [ -n "${PUGS_SYNC_WEBHOOK_URL:-}" ]; then
+      BASE_URL=$(echo "$PUGS_SYNC_WEBHOOK_URL" | cut -d/ -f1-3)
+      curl -sS -m 5 -X POST "$BASE_URL/api/sync/health" \
+        -H "x-pugs-sync-secret: $PUGS_SYNC_SECRET" \
+        -H "x-pugs-scanner-id: ${PUGS_SCANNER_ID:-}" \
+        -H "content-type: application/json" \
+        -d '{"service":"updater","status":"error","error":"git merge failed"}' \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   exit 0
 fi
 
